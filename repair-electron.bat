@@ -1,11 +1,20 @@
 @echo off
-setlocal enabledelayedexpansion
-title Electron Reparatur
-chcp 65001 >nul 2>&1
+:: cmd /k als aeussere Huelle: Fenster bleibt IMMER offen, egal was passiert
+if not "%1"=="__RUN__" (
+    cmd /k ""%~f0" __RUN__"
+    exit /b
+)
 
+setlocal enabledelayedexpansion
+chcp 65001 >nul 2>&1
 cd /d "%~dp0"
 
-:: Node.js in PATH aufnehmen falls noetig
+echo ============================================================
+echo  Electron Binary Reparatur
+echo ============================================================
+echo.
+
+:: ---- Node.js finden --------------------------------------------------------
 where node >nul 2>&1
 if errorlevel 1 (
     for %%P in (
@@ -17,91 +26,112 @@ if errorlevel 1 (
     ) do (
         if exist "%%~P\node.exe" (
             set "PATH=%%~P;!PATH!"
-            goto :node_found
+            goto :node_ok
         )
     )
-    echo [FEHLER] Node.js nicht gefunden.
-    pause & exit /b 1
+    echo [FEHLER] Node.js nicht gefunden. Bitte zuerst install-deps.bat ausfuehren.
+    goto :end
 )
-:node_found
+:node_ok
+for /f "tokens=*" %%V in ('node --version') do echo [OK] Node.js %%V
 
-echo ============================================================
-echo  Electron Binary Reparatur
-echo ============================================================
-echo.
-
-:: Electron-Version aus node_modules lesen
-for /f "usebackq tokens=*" %%V in (`node -e "process.stdout.write(require('./node_modules/electron/package.json').version)"`) do set "EVERSION=%%V"
-if "!EVERSION!"=="" (
-    echo [FEHLER] Kann Electron-Version nicht lesen.
+:: ---- Electron-Version lesen (KEIN Backtick-for, da ) den Parser bricht) ---
+set "EPKG=%~dp0node_modules\electron\package.json"
+if not exist "%EPKG%" (
+    echo [FEHLER] node_modules\electron\package.json nicht gefunden.
     echo Bitte install-deps.bat erneut ausfuehren.
-    pause & exit /b 1
+    goto :end
 )
-echo Electron Version: !EVERSION!
 
+:: Version in Tempfile schreiben, dann mit set /p einlesen
+node -e "process.stdout.write(require('%EPKG:\=/%').version)" > "%TEMP%\_eversion.txt" 2>&1
+set /p EVERSION= < "%TEMP%\_eversion.txt"
+del "%TEMP%\_eversion.txt" >nul 2>&1
+
+if "!EVERSION!"=="" (
+    echo [FEHLER] Konnte Electron-Version nicht lesen.
+    goto :end
+)
+echo [OK] Electron-Version: !EVERSION!
+
+:: ---- Zielverzeichnis -------------------------------------------------------
 set "DIST_DIR=%~dp0node_modules\electron\dist"
-set "ELECTRON_EXE=%DIST_DIR%\electron.exe"
+set "ELECTRON_EXE=!DIST_DIR!\electron.exe"
+set "PATH_TXT=%~dp0node_modules\electron\path.txt"
 
-:: Pruefen ob Binary schon existiert
-if exist "%ELECTRON_EXE%" (
-    echo Binary bereits vorhanden: %ELECTRON_EXE%
-    echo Starte Reparatur trotzdem (path.txt erneuern)...
+if exist "!ELECTRON_EXE!" (
+    echo [INFO] electron.exe bereits vorhanden - erneuere trotzdem path.txt
+    echo dist\electron.exe> "!PATH_TXT!"
+    echo [OK] path.txt repariert. Starte jetzt start.bat.
+    goto :end
 )
 
-:: GitHub-Download-URL zusammenbauen
+:: ---- Binary-ZIP von GitHub laden -------------------------------------------
 set "ZIP_URL=https://github.com/electron/electron/releases/download/v!EVERSION!/electron-v!EVERSION!-win32-x64.zip"
-set "ZIP_TMP=%TEMP%\electron-win32-x64.zip"
-set "ZIP_EXTRACT=%TEMP%\electron-extract"
+set "ZIP_TMP=%TEMP%\_electron_bin.zip"
+set "ZIP_EXTRACT=%TEMP%\_electron_extract"
 
 echo.
-echo Lade Electron Binary herunter (~90 MB)...
+echo Lade Electron Binary (~90 MB) herunter...
 echo URL: !ZIP_URL!
 echo.
 
-powershell -NoProfile -Command ^
-    "Invoke-WebRequest -Uri '!ZIP_URL!' -OutFile '!ZIP_TMP!' -UseBasicParsing"
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "try { Invoke-WebRequest -Uri '!ZIP_URL!' -OutFile '!ZIP_TMP!' -UseBasicParsing; Write-Host 'Download OK' } catch { Write-Host ('Download FEHLER: ' + $_.Exception.Message); exit 1 }"
 
 if not exist "!ZIP_TMP!" (
     echo.
-    echo [FEHLER] Download fehlgeschlagen.
+    echo [FEHLER] Download fehlgeschlagen (Netzwerk oder Proxy).
     echo.
-    echo Bitte manuell:
-    echo   1. Im Browser oeffnen: !ZIP_URL!
-    echo   2. ZIP herunterladen
-    echo   3. Inhalt entpacken nach: %DIST_DIR%
-    echo      (so dass dort electron.exe liegt)
-    echo   4. start.bat erneut starten
-    pause & exit /b 1
+    echo Manuelle Alternative:
+    echo   1. Oeffne im Browser:  !ZIP_URL!
+    echo   2. Speichere die ZIP als:  !DIST_DIR!\..\electron_bin.zip
+    echo      (also im Ordner node_modules\electron\)
+    echo   3. Starte diese Datei erneut - sie erkennt die ZIP automatisch.
+    goto :end
 )
 
-echo Entpacke...
-if exist "!ZIP_EXTRACT!" rmdir /s /q "!ZIP_EXTRACT!"
-powershell -NoProfile -Command "Expand-Archive -Path '!ZIP_TMP!' -DestinationPath '!ZIP_EXTRACT!' -Force"
-del "!ZIP_TMP!" >nul 2>&1
+:: ---- Auch manuell gelegte ZIP akzeptieren ----------------------------------
+:extract
+echo Entpacke ZIP...
+if exist "!ZIP_EXTRACT!" rmdir /s /q "!ZIP_EXTRACT!" >nul 2>&1
+
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "try { Expand-Archive -Path '!ZIP_TMP!' -DestinationPath '!ZIP_EXTRACT!' -Force; Write-Host 'Entpackt OK' } catch { Write-Host ('Entpacken FEHLER: ' + $_.Exception.Message); exit 1 }"
 
 if not exist "!ZIP_EXTRACT!\electron.exe" (
     echo [FEHLER] electron.exe nicht im ZIP gefunden.
-    pause & exit /b 1
+    echo Inhalt von !ZIP_EXTRACT!:
+    dir "!ZIP_EXTRACT!" /b 2>nul
+    goto :end
 )
 
-:: dist-Verzeichnis befuellen
-if not exist "%DIST_DIR%" mkdir "%DIST_DIR%"
-echo Kopiere nach %DIST_DIR%...
-xcopy /e /y /q "!ZIP_EXTRACT!\*" "%DIST_DIR%\" >nul
+:: ---- In dist\ kopieren -----------------------------------------------------
+if not exist "!DIST_DIR!" mkdir "!DIST_DIR!"
+echo Kopiere nach !DIST_DIR!...
+xcopy /e /y /q "!ZIP_EXTRACT!\*" "!DIST_DIR!\" >nul 2>&1
 rmdir /s /q "!ZIP_EXTRACT!" >nul 2>&1
+del "!ZIP_TMP!" >nul 2>&1
 
-:: path.txt schreiben (zeigt auf electron.exe)
-echo dist\electron.exe> "%~dp0node_modules\electron\path.txt"
+:: ---- path.txt schreiben ----------------------------------------------------
+echo dist\electron.exe> "!PATH_TXT!"
 
-:: Pruefen
-if exist "%ELECTRON_EXE%" (
+:: ---- Ergebnis pruefen ------------------------------------------------------
+if exist "!ELECTRON_EXE!" (
     echo.
-    echo [OK] Electron Binary erfolgreich installiert.
-    echo      %ELECTRON_EXE%
+    echo [OK] Electron Binary erfolgreich installiert:
+    echo      !ELECTRON_EXE!
     echo.
     echo Starte jetzt start.bat
 ) else (
-    echo [FEHLER] electron.exe immer noch nicht gefunden.
+    echo.
+    echo [FEHLER] electron.exe immer noch nicht gefunden nach dem Kopieren.
+    echo Inhalt von !DIST_DIR!:
+    dir "!DIST_DIR!" /b 2>nul
 )
+
+:end
 echo.
-pause
+echo ============================================================
+echo  Fertig. Dieses Fenster kannst du schliessen.
+echo ============================================================
