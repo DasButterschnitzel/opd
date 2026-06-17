@@ -1,5 +1,16 @@
 const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage } = require('electron');
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
+
+// Ungefangene Fehler ins Home-Verzeichnis loggen (hilft beim Debugging)
+process.on('uncaughtException', (err) => {
+  const logFile = path.join(os.homedir(), 'op-epaper-crash.log');
+  const msg = `\n[${new Date().toISOString()}] CRASH\n${err.stack || err}\n`;
+  try { fs.appendFileSync(logFile, msg); } catch {}
+  console.error(msg);
+});
+
 const { loadConfig, saveConfig } = require('./core/config');
 const { runDownload } = require('./core/downloader');
 const { createLogger, getRecentLogs } = require('./core/logger');
