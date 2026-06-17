@@ -5,7 +5,6 @@ const { app } = require('electron');
 const { saveConfig, loadConfig } = require('./config');
 
 function getChromiumPath() {
-  // 1. Packaged build: bundled Chromium under resources/chromium-browser
   if (app.isPackaged) {
     const bundled = path.join(process.resourcesPath, 'chromium-browser');
     for (const c of [
@@ -17,34 +16,28 @@ function getChromiumPath() {
     }
   }
 
-  // 2. Path written by setup.ps1 (covers ms-playwright, system Chrome, Edge)
   const browserPathFile = path.join(__dirname, '..', 'browser-path.txt');
   if (fs.existsSync(browserPathFile)) {
     const saved = fs.readFileSync(browserPathFile, 'utf8').trim();
     if (saved && fs.existsSync(saved)) return saved;
   }
 
-  // 3. Explicit env override
   if (process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH) {
     return process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
   }
 
-  // 4. Any ms-playwright Chromium (newest first)
   const localAppData = process.env.LOCALAPPDATA || '';
   const pwBase = path.join(localAppData, 'ms-playwright');
   if (fs.existsSync(pwBase)) {
-    const dirs = fs.readdirSync(pwBase)
-      .filter(d => d.startsWith('chromium-'))
-      .sort().reverse();
+    const dirs = fs.readdirSync(pwBase).filter(d => d.startsWith('chromium-')).sort().reverse();
     for (const d of dirs) {
       const exe = path.join(pwBase, d, 'chrome-win', 'chrome.exe');
       if (fs.existsSync(exe)) return exe;
     }
   }
 
-  // 5. System Chrome / Edge
-  const pf   = process.env['ProgramFiles']       || 'C:\\Program Files';
-  const pf86 = process.env['ProgramFiles(x86)']  || 'C:\\Program Files (x86)';
+  const pf   = process.env['ProgramFiles']      || 'C:\\Program Files';
+  const pf86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
   for (const c of [
     path.join(pf,          'Google', 'Chrome', 'Application', 'chrome.exe'),
     path.join(pf86,        'Google', 'Chrome', 'Application', 'chrome.exe'),
@@ -60,18 +53,120 @@ function getChromiumPath() {
 
 const PORTAL = 'https://epaper.op-online.de';
 
+// ---------------------------------------------------------------------------
+// Enumerate download options from the open dropdown.
+// Tries multiple strategies because the rebrush portal may render the menu
+// inside the custom element OR in an Angular CDK overlay appended to <body>.
+// ---------------------------------------------------------------------------
+async function getDropdownOptions(page, logger) {
+  await page.waitForTimeout(500);
+
+  // Strategy A: elements directly inside rebrush-download
+  const innerStrategies = [
+    'rebrush-download button',
+    'rebrush-download li',
+    'rebrush-download [role="menuitem"]',
+    'rebrush-download a',
+    'rebrush-download span[class]',
+  ];
+  for (const sel of innerStrategies) {
+    try {
+      const loc = page.locator(sel);
+      const cnt = await loc.count({ timeout: 800 });
+      if (cnt > 0) {
+        const texts = (await loc.allTextContents()).map(t => t.trim()).filter(t => t.length > 1);
+        if (texts.length) {
+          logger.info('Dropdown-Optionen [' + sel + ']: ' + texts.join(', '));
+          return texts;
+        }
+      }
+    } catch {}
+  }
+
+  // Strategy B: Angular CDK / Material overlay appended to document body
+  const overlayStrategies = [
+    '.cdk-overlay-container button',
+    '.cdk-overlay-container li',
+    '.cdk-overlay-container [role="menuitem"]',
+    'mat-option',
+    '[mat-menu-item]',
+    'mat-menu button',
+  ];
+  for (const sel of overlayStrategies) {
+    try {
+      const loc = page.locator(sel);
+      const cnt = await loc.count({ timeout: 800 });
+      if (cnt > 0) {
+        const texts = (await loc.allTextContents()).map(t => t.trim()).filter(t => t.length > 1);
+        if (texts.length) {
+          logger.info('Dropdown-Optionen [overlay/' + sel + ']: ' + texts.join(', '));
+          return texts;
+        }
+      }
+    } catch {}
+  }
+
+  // Strategy C: walk all leaf DOM nodes inside rebrush-download (incl. shadow DOM)
+  try {
+    const nodeTexts = await page.locator('rebrush-download').first().evaluate(el => {
+      const seen = new Set();
+      const walk = root => {
+        root.querySelectorAll('*').forEach(n => {
+          if (n.children.length === 0) {
+            const t = (n.textContent || '').trim();
+            if (t && t.length > 1 && t.length < 60) seen.add(t);
+          }
+        });
+        if (root.shadowRoot) walk(root.shadowRoot);
+      };
+      walk(el);
+      return [...seen];
+    });
+    if (nodeTexts.length) {
+      logger.info('Dropdown-Optionen [DOM-walk]: ' + nodeTexts.join(', '));
+      return nodeTexts;
+    }
+  } catch {}
+
+  // Fallback: the options recorded by codegen
+  logger.warn('Dropdown-Optionen nicht automatisch erkannt – nutze Standardnamen.');
+  return ['Linke Seite', 'Rechte Seite'];
+}
+
+// Sanitize option text to a safe filename segment
+function toSafeFilename(text) {
+  return text
+    .replace(/[\\/:*?"<>|]/g, '_')
+    .replace(/\s+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_|_$/g, '')
+    .substring(0, 60);
+}
+
+// ---------------------------------------------------------------------------
+// Main download function
+// ---------------------------------------------------------------------------
 async function runDownload(config, logger, abortSignal) {
   const { username, password, outputDir } = config;
   const today = new Date().toISOString().slice(0, 10);
 
-  // Portal liefert zwei Seiten pro Tag
-  const fileLinks  = path.join(outputDir, `Dreieich_${today}_links.pdf`);
-  const fileRechts = path.join(outputDir, `Dreieich_${today}_rechts.pdf`);
-
-  if (fs.existsSync(fileLinks) && fs.existsSync(fileRechts)) {
-    logger.info('Dateien fuer heute bereits vorhanden – ueberspringe.');
-    return { skipped: true, path: fileLinks };
-  }
+  // ------------------------------------------------------------------
+  // IDEMPOTENZ: Wenn heute bereits erfolgreich geladen wurde UND
+  // mindestens eine Dreieich-Datei fuer heute existiert -> ueberspringen.
+  // So wird der Login komplett vermieden.
+  // ------------------------------------------------------------------
+  try {
+    const cfg = await loadConfig();
+    if (cfg.lastSuccess && cfg.lastSuccess.slice(0, 10) === today) {
+      const existing = fs.existsSync(outputDir)
+        ? fs.readdirSync(outputDir).filter(f => f.startsWith(`Dreieich_${today}`) && f.endsWith('.pdf'))
+        : [];
+      if (existing.length > 0) {
+        logger.info('Bereits heute heruntergeladen: ' + existing.join(', ') + ' – ueberspringe.');
+        return { skipped: true, path: path.join(outputDir, existing[0]) };
+      }
+    }
+  } catch {}
 
   fs.mkdirSync(outputDir, { recursive: true });
 
@@ -96,96 +191,113 @@ async function runDownload(config, logger, abortSignal) {
 
   try {
     // ------------------------------------------------------------------
-    // 1) PORTAL OEFFNEN
+    // 1) PORTAL
     // ------------------------------------------------------------------
     logger.info('Navigiere zu ' + PORTAL);
     await page.goto(PORTAL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
 
     // ------------------------------------------------------------------
-    // 2) LOGIN-LINK KLICKEN
+    // 2) LOGIN
     // ------------------------------------------------------------------
     logger.info('Klicke Anmelden-Link');
     await page.getByRole('link', { name: /Anmelden/ }).first().click();
     await page.waitForLoadState('domcontentloaded', { timeout: 15_000 });
 
-    // ------------------------------------------------------------------
-    // 3) LOGIN-FORMULAR
-    // ------------------------------------------------------------------
     logger.info('Fuelle Login-Formular');
     await page.getByPlaceholder('E-Mail').fill(username);
     await page.getByPlaceholder('Passwort').fill(password);
     await page.getByRole('button', { name: 'Anmelden' }).click();
     await page.waitForLoadState('networkidle', { timeout: 30_000 });
 
-    // ------------------------------------------------------------------
-    // 4) OPTIONALER "MIT ANMELDUNG FORTFAHREN"-DIALOG
-    // ------------------------------------------------------------------
+    // Optionaler "mit Anmeldung fortfahren" Dialog
     await page.getByRole('link', { name: /mit Anmeldung fortfahren/i })
-      .click({ timeout: 5_000 })
-      .catch(() => {});
+      .click({ timeout: 5_000 }).catch(() => {});
     await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
 
-    // Login-Fehler pruefen
-    const loginError = await page
-      .getByText(/ungueltig|falsch|incorrect|invalid|fehlgeschlagen/i)
+    const loginError = await page.getByText(/ungueltig|falsch|incorrect|invalid|fehlgeschlagen/i)
       .isVisible({ timeout: 3_000 }).catch(() => false);
     if (loginError) throw new Error('Login fehlgeschlagen – Zugangsdaten pruefen.');
     logger.info('Login erfolgreich');
 
     // ------------------------------------------------------------------
-    // 5) AKTUELLE AUSGABE ANKLICKEN
+    // 3) AKTUELLE AUSGABE
     // ------------------------------------------------------------------
     logger.info('Waehle aktuelle Ausgabe');
-    await page.getByRole('link', { name: /Offenbach-Post/ }).first()
-      .click({ timeout: 20_000 });
+    await page.getByRole('link', { name: /Offenbach-Post/ }).first().click({ timeout: 20_000 });
     await page.waitForLoadState('networkidle', { timeout: 30_000 });
 
     // ------------------------------------------------------------------
-    // 6) DREIEICH-SEITE AUSWAEHLEN
+    // 4) DREIEICH-SEKTION FINDEN
+    // Partial match: findet "Dreieich", "Dreieich + Neu-Isenburg", etc.
     // ------------------------------------------------------------------
-    logger.info('Navigiere zur Dreieich-Ausgabe');
+    logger.info('Oeffne Sektionsliste');
     await page.locator('rebrush-department-list-control div').nth(2).click();
-    await page.getByText('Dreieich', { exact: true }).click({ timeout: 10_000 });
+    await page.waitForTimeout(400);
+
+    const dreieichItem = page.locator('rebrush-department-list-control').getByText(/Dreieich/i).first();
+    const sectionLabel = (await dreieichItem.textContent({ timeout: 10_000 })).trim();
+    logger.info('Sektion gefunden: "' + sectionLabel + '"');
+
+    // Hinweis wenn Kombiseite
+    if (sectionLabel.toLowerCase() !== 'dreieich') {
+      logger.info('Hinweis: Kombiseite – Dreieich erscheint zusammen mit anderen Orten.');
+    }
+
+    await dreieichItem.click();
     await page.waitForLoadState('networkidle', { timeout: 20_000 });
-    logger.info('Dreieich-Seite geladen');
 
     // ------------------------------------------------------------------
-    // 7) LINKE SEITE HERUNTERLADEN
+    // 5) DOWNLOAD-OPTIONEN ERMITTELN
     // ------------------------------------------------------------------
-    if (!fs.existsSync(fileLinks)) {
-      logger.info('Lade linke Seite herunter');
+    logger.info('Oeffne Download-Dropdown');
+    await page.locator('rebrush-download i').first().click();
+    const options = await getDropdownOptions(page, logger);
+
+    // Dropdown schliessen bevor wir es pro Option neu oeffnen
+    await page.keyboard.press('Escape').catch(() => {});
+    await page.waitForTimeout(200);
+
+    // ------------------------------------------------------------------
+    // 6) ALLE OPTIONEN HERUNTERLADEN
+    // ------------------------------------------------------------------
+    const downloadedFiles = [];
+    for (const optText of options) {
+      const safeSuffix = toSafeFilename(optText);
+      const outFile    = path.join(outputDir, `Dreieich_${today}_${safeSuffix}.pdf`);
+
+      if (fs.existsSync(outFile)) {
+        logger.info('Bereits vorhanden: ' + outFile);
+        downloadedFiles.push(outFile);
+        continue;
+      }
+
+      logger.info('Lade herunter: "' + optText + '"');
       await page.locator('rebrush-download i').first().click();
-      const [dl1] = await Promise.all([
+      await page.waitForTimeout(300);
+
+      const [dl] = await Promise.all([
         page.waitForEvent('download', { timeout: 60_000 }),
-        page.locator('rebrush-download').getByText('Linke Seite').click(),
+        page.locator('rebrush-download').getByText(optText).first().click(),
       ]);
-      await dl1.saveAs(fileLinks);
-      const f1 = await dl1.failure();
-      if (f1) throw new Error('Download linke Seite fehlgeschlagen: ' + f1);
-      logger.info('Gespeichert: ' + fileLinks);
+
+      await dl.saveAs(outFile);
+      const failure = await dl.failure();
+      if (failure) throw new Error('Download "' + optText + '" fehlgeschlagen: ' + failure);
+
+      downloadedFiles.push(outFile);
+      logger.info('Gespeichert: ' + outFile);
     }
 
-    // ------------------------------------------------------------------
-    // 8) RECHTE SEITE HERUNTERLADEN
-    // ------------------------------------------------------------------
-    if (!fs.existsSync(fileRechts)) {
-      logger.info('Lade rechte Seite herunter');
-      await page.locator('rebrush-download i').first().click();
-      const [dl2] = await Promise.all([
-        page.waitForEvent('download', { timeout: 60_000 }),
-        page.locator('rebrush-download').getByText('Rechte Seite').click(),
-      ]);
-      await dl2.saveAs(fileRechts);
-      const f2 = await dl2.failure();
-      if (f2) throw new Error('Download rechte Seite fehlgeschlagen: ' + f2);
-      logger.info('Gespeichert: ' + fileRechts);
+    if (downloadedFiles.length === 0) {
+      throw new Error('Keine Dateien heruntergeladen – Dropdown leer?');
     }
 
-    // Erfolg festhalten
+    logger.info('Fertig. ' + downloadedFiles.length + ' Datei(en) heruntergeladen.');
+
     const cfg = await loadConfig();
     await saveConfig({ ...cfg, lastSuccess: new Date().toISOString() });
 
-    return { skipped: false, path: fileLinks };
+    return { skipped: false, path: downloadedFiles[0] };
 
   } catch (err) {
     try {
