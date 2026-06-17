@@ -4,21 +4,45 @@ Automatischer täglicher Download der Dreieich-Lokalseite aus dem OP-Online ePap
 
 ## Voraussetzungen
 
-- Node.js LTS (≥ 20)
-- Windows 10/11 (empfohlen; macOS/Linux für Entwicklung)
+- Windows 10/11
+- **Keine Adminrechte nötig** – die Einrichtung läuft komplett im Benutzerprofil.
 
-## Installation (Entwicklung)
+## Schnellstart (Windows)
+
+Drei Doppelklicks, in dieser Reihenfolge:
+
+1. **`setup.bat`** – richtet alles ein (Node.js portabel falls nötig, npm-Pakete,
+   Electron-Binary, Playwright Chromium). Lädt fehlende Teile automatisch herunter.
+2. **`codegen.bat`** – nimmt den Klickweg auf (Login → Dreieich-Seite → Download).
+   Den erzeugten Code in `core/downloader.js` eintragen (siehe unten).
+3. **`start.bat`** – startet die App.
+
+> Alle `.bat`-Dateien sind nur dünne Starter; die eigentliche Logik liegt in
+> `scripts/*.ps1` (PowerShell), damit es keine Batch-Parser-Probleme gibt.
+
+### Warum PowerShell statt reinem Batch?
+
+Downloads, ZIP-Entpacken und das dauerhafte Setzen des Benutzer-PATH sind in
+PowerShell zuverlässig und ohne Admin möglich. `setup.bat` ruft daher nur
+`scripts\setup.ps1` mit `-ExecutionPolicy Bypass` auf (umgeht die
+Ausführungsrichtlinie für genau diesen Lauf, ohne Systemänderung).
+
+### Installation (Entwickler / manuell)
 
 ```bash
 npm install
 npx playwright install chromium
 ```
 
+Falls der Electron-Postinstall im Firmennetz geblockt wird
+(`Electron failed to install correctly`), behebt `setup.bat` das automatisch –
+es lädt das passende Electron-Binary direkt von GitHub und repariert `path.txt`.
+
 ## Starten
 
 ```bash
-# GUI-Modus (Doppelklick auf .exe oder):
-npm start
+# GUI-Modus:
+npm start            # oder: start.bat
 
 # Headless-Modus (für Aufgabenplaner):
 npm run start:headless

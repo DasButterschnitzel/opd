@@ -6,35 +6,26 @@
   "scripts": {
     "start": "electron .",
     "start:headless": "electron . --headless",
-    "dist": "electron-builder",
     "dist:win": "electron-builder --win --x64"
   },
   "dependencies": {
-    "playwright-core": "^1.44.0",
-    "winston": "^3.13.0",
-    "winston-daily-rotate-file": "^5.0.0"
+    "playwright": "1.49.1"
   },
   "devDependencies": {
-    "electron": "^31.0.0",
-    "electron-builder": "^24.13.0"
+    "electron": "31.7.7",
+    "electron-builder": "24.13.3"
   },
   "build": {
     "appId": "de.dreieich.op-epaper-tool",
     "productName": "OP ePaper Tool",
     "win": {
       "target": [
-        {
-          "target": "nsis",
-          "arch": ["x64"]
-        }
-      ],
-      "icon": "build/icon.ico"
+        { "target": "nsis", "arch": ["x64"] }
+      ]
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "installerIcon": "build/icon.ico",
-      "uninstallerIcon": "build/icon.ico"
+      "allowToChangeInstallationDirectory": true
     },
     "files": [
       "main.js",
@@ -42,14 +33,6 @@
       "core/**/*",
       "renderer/**/*",
       "node_modules/**/*"
-    ],
-    "extraResources": [
-      {
-        "from": "chromium-browser",
-        "to": "chromium-browser",
-        "filter": ["**/*"]
-      }
-    ],
-    "afterSign": "scripts/after-sign.js"
+    ]
   }
 }
