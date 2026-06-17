@@ -1,6 +1,11 @@
 # Playwright Selektor-Recorder
 # Oeffnet https://epaper.op-online.de im Browser und zeichnet Klicks auf.
 # Voraussetzung: setup.bat wurde erfolgreich ausgefuehrt.
+#
+# Wichtig: 'codegen' nutzt NICHT den exe-Pfad aus browser-path.txt, sondern
+# einen "channel" (chrome/msedge) eines installierten Marken-Browsers.
+# Dadurch entfaellt das eingebaute Chromium komplett (kein Versions-Mismatch,
+# kein 150-MB-Download, kein haengendes Entpacken).
 
 $ProjectDir = Split-Path -Parent $PSScriptRoot
 Set-Location $ProjectDir
@@ -28,22 +33,34 @@ if (-not $nodeDir) {
 $env:Path = "$nodeDir;" + $env:Path
 $npxCmd = Join-Path $nodeDir 'npx.cmd'
 
-# Browser-Pfad aus setup.ps1 laden
-$browserPathTxt = Join-Path $ProjectDir 'browser-path.txt'
-if (-not (Test-Path $browserPathTxt)) {
-    Write-Host "[FEHLER] browser-path.txt fehlt. Bitte zuerst setup.bat ausfuehren." -ForegroundColor Red
-    exit 1
-}
-$browserExe = (Get-Content $browserPathTxt -Raw).Trim()
-if (-not (Test-Path $browserExe)) {
-    Write-Host "[FEHLER] Browser nicht gefunden: $browserExe" -ForegroundColor Red
-    Write-Host "         Bitte setup.bat erneut ausfuehren." -ForegroundColor Red
-    exit 1
+# Installierten Marken-Browser fuer den codegen-Channel finden
+function Find-Channel {
+    $pf   = $env:ProgramFiles
+    $pf86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+    $lad  = $env:LOCALAPPDATA
+
+    $chrome = @(
+        (Join-Path $pf  'Google\Chrome\Application\chrome.exe'),
+        (Join-Path $lad 'Google\Chrome\Application\chrome.exe')
+    )
+    if ($pf86) { $chrome += (Join-Path $pf86 'Google\Chrome\Application\chrome.exe') }
+    foreach ($c in $chrome) { if ($c -and (Test-Path $c)) { return 'chrome' } }
+
+    $edge = @( (Join-Path $pf 'Microsoft\Edge\Application\msedge.exe') )
+    if ($pf86) { $edge += (Join-Path $pf86 'Microsoft\Edge\Application\msedge.exe') }
+    foreach ($c in $edge) { if ($c -and (Test-Path $c)) { return 'msedge' } }
+
+    return $null
 }
 
-# Dem playwright-codegen-Prozess mitteilen welchen Browser er nutzen soll
-$env:PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH = $browserExe
-Write-Host "Browser: $browserExe" -ForegroundColor DarkGray
+$channel = Find-Channel
+if (-not $channel) {
+    Write-Host "[FEHLER] Weder Chrome noch Edge gefunden." -ForegroundColor Red
+    Write-Host "         Bitte Google Chrome installieren und erneut versuchen:" -ForegroundColor Red
+    Write-Host "         https://www.google.com/intl/de/chrome/?standalone=1"
+    exit 1
+}
+Write-Host "Browser-Channel: $channel" -ForegroundColor DarkGray
 
 # Playwright-Version aus playwright-core ermitteln
 $pwCorePkg = Join-Path $ProjectDir 'node_modules\playwright-core\package.json'
@@ -62,9 +79,10 @@ Write-Host "  3. PDF-Download-Button klicken"
 Write-Host "  4. Generierten Code rechts kopieren"
 Write-Host "  5. In core\downloader.js bei SEL_* und DOWNLOAD_SELECTOR eintragen"
 Write-Host ""
-Write-Host "(npx playwright@$pwVer codegen)" -ForegroundColor DarkGray
+Write-Host "(npx playwright@$pwVer codegen --channel=$channel)" -ForegroundColor DarkGray
 Write-Host ""
 
-$cmdLine = "`"$npxCmd`" --yes playwright@$pwVer codegen https://epaper.op-online.de"
+# --channel nutzt den installierten Browser - kein Chromium-Download noetig
+$cmdLine = "`"$npxCmd`" --yes playwright@$pwVer codegen --channel=$channel https://epaper.op-online.de"
 Write-Host "> $cmdLine" -ForegroundColor DarkGray
 cmd.exe /c $cmdLine
