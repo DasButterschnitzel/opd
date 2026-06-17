@@ -199,24 +199,41 @@ if (Test-Path $electronExe) {
 # =============================================================================
 Step 4 "Playwright Chromium"
 
-# Chromium-Verzeichnis pruefen
-$pwBrowserBase = Join-Path $env:LOCALAPPDATA 'ms-playwright'
-$chromiumExists = $false
-if (Test-Path $pwBrowserBase) {
-    $chromiumDir = Get-ChildItem $pwBrowserBase -Directory |
-                   Where-Object { $_.Name -like 'chromium*' } |
-                   Select-Object -First 1
-    if ($chromiumDir) { $chromiumExists = $true }
+# Revision ermitteln, die playwright-core 1.49.1 benoetigt
+$pwPkgJson = Join-Path $ProjectDir 'node_modules\playwright-core\package.json'
+$pwRevision = $null
+if (Test-Path $pwPkgJson) {
+    try {
+        $pwPkg = Get-Content $pwPkgJson -Raw | ConvertFrom-Json
+        # Revision steht unter browsers[].revision fuer chromium
+        $chromiumEntry = $pwPkg.browsers | Where-Object { $_.name -eq 'chromium' } | Select-Object -First 1
+        if ($chromiumEntry) { $pwRevision = $chromiumEntry.revision }
+    } catch {}
 }
 
-if (-not $chromiumExists) {
-    Info "Installiere Playwright Chromium (~150 MB)..."
+# Pruefen ob EXAKT die passende Chromium-Revision vorhanden ist
+$pwBrowserBase  = Join-Path $env:LOCALAPPDATA 'ms-playwright'
+$chromiumOk     = $false
+if ($pwRevision -and (Test-Path $pwBrowserBase)) {
+    $expectedDir = Join-Path $pwBrowserBase "chromium-$pwRevision"
+    if (Test-Path (Join-Path $expectedDir 'chrome-win\chrome.exe')) {
+        $chromiumOk = $true
+    }
+}
+
+if ($chromiumOk) {
+    Ok "Chromium Revision $pwRevision bereits vorhanden"
+} else {
+    if ($pwRevision) {
+        Info "Benoetigt: chromium-$pwRevision (installiere passende Revision fuer playwright-core)"
+    } else {
+        Info "Installiere Playwright Chromium (~150 MB)..."
+    }
 
     # playwright-core stellt 'playwright-core' als bin-Script bereit.
     # Wir rufen es ueber cmd.exe /c auf - das umgeht alle PS-Quoting-Fallen.
     $pwCoreBin = Join-Path $ProjectDir 'node_modules\.bin\playwright-core.cmd'
     if (-not (Test-Path $pwCoreBin)) {
-        # Aeltere Versionen haben das CLI direkt in playwright-core/cli.js
         $pwCoreBin = $null
     }
 
@@ -231,7 +248,6 @@ if (-not $chromiumExists) {
         if (Test-Path $cliJs) {
             $rc = Invoke-Cmd "`"$nodeExe`" `"$cliJs`" install chromium"
         } else {
-            # Letzter Fallback: npx
             $rc = Invoke-Cmd "`"$npxCmd`" playwright-core install chromium"
         }
     }
@@ -242,8 +258,6 @@ if (-not $chromiumExists) {
         exit 1
     }
     Ok "Chromium installiert"
-} else {
-    Ok "Chromium bereits vorhanden ($($chromiumDir.FullName))"
 }
 
 # =============================================================================
