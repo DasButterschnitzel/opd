@@ -20,24 +20,58 @@ const path = require('path');
 const { app } = require('electron');
 const { saveConfig, loadConfig } = require('./config');
 
-// Pfad zum gebündelten Chromium (nach electron-builder-Packaging)
 function getChromiumPath() {
-  // Im gepackten Build liegt Chromium unter resources/chromium-browser
+  // 1. Packaged build: bundled Chromium under resources/chromium-browser
   if (app.isPackaged) {
     const bundled = path.join(process.resourcesPath, 'chromium-browser');
-    // Plattform-spezifischer Pfad innerhalb des Chromium-Verzeichnisses
-    const candidates = [
-      path.join(bundled, 'chrome-win', 'chrome.exe'),          // Windows
-      path.join(bundled, 'chrome-linux', 'chrome'),             // Linux
-      path.join(bundled, 'chrome-mac', 'Chromium.app',
-        'Contents', 'MacOS', 'Chromium'),                       // macOS
-    ];
-    for (const c of candidates) {
+    for (const c of [
+      path.join(bundled, 'chrome-win', 'chrome.exe'),
+      path.join(bundled, 'chrome-linux', 'chrome'),
+      path.join(bundled, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+    ]) {
       if (fs.existsSync(c)) return c;
     }
   }
-  // Entwicklungsmodus: über PLAYWRIGHT_BROWSERS_PATH oder System-Chromium
-  return process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || undefined;
+
+  // 2. Path written by setup.ps1 (covers ms-playwright, system Chrome, Edge)
+  const browserPathFile = path.join(__dirname, '..', 'browser-path.txt');
+  if (fs.existsSync(browserPathFile)) {
+    const saved = fs.readFileSync(browserPathFile, 'utf8').trim();
+    if (saved && fs.existsSync(saved)) return saved;
+  }
+
+  // 3. Explicit env override
+  if (process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH) {
+    return process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
+  }
+
+  // 4. Any ms-playwright Chromium (newest first)
+  const localAppData = process.env.LOCALAPPDATA || '';
+  const pwBase = path.join(localAppData, 'ms-playwright');
+  if (fs.existsSync(pwBase)) {
+    const dirs = fs.readdirSync(pwBase)
+      .filter(d => d.startsWith('chromium-'))
+      .sort().reverse();
+    for (const d of dirs) {
+      const exe = path.join(pwBase, d, 'chrome-win', 'chrome.exe');
+      if (fs.existsSync(exe)) return exe;
+    }
+  }
+
+  // 5. System Chrome / Edge
+  const pf  = process.env['ProgramFiles']        || 'C:\\Program Files';
+  const pf86 = process.env['ProgramFiles(x86)']  || 'C:\\Program Files (x86)';
+  for (const c of [
+    path.join(pf,   'Google', 'Chrome', 'Application', 'chrome.exe'),
+    path.join(pf86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    path.join(localAppData, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    path.join(pf86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    path.join(pf,   'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+  ]) {
+    if (fs.existsSync(c)) return c;
+  }
+
+  return undefined;
 }
 
 const PORTAL = 'https://epaper.op-online.de';

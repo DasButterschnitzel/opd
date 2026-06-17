@@ -195,70 +195,129 @@ if (Test-Path $electronExe) {
 }
 
 # =============================================================================
-# 4) PLAYWRIGHT CHROMIUM
+# 4) BROWSER FUER PLAYWRIGHT
 # =============================================================================
-Step 4 "Playwright Chromium"
+Step 4 "Browser fuer Playwright"
 
-# Revision ermitteln, die playwright-core 1.49.1 benoetigt
-$pwPkgJson = Join-Path $ProjectDir 'node_modules\playwright-core\package.json'
+# Cascade: A) Playwright-Chromium (exakte Revision)
+#          B) Anderes ms-playwright Chromium (z.B. von frueherer Installation)
+#          C) System-Chrome
+#          D) System-Edge (Chromium-basiert)
+#          E) Download (letzter Ausweg)
+# Ergebnis wird in browser-path.txt gespeichert - App und codegen.ps1 lesen daraus.
+
+$browserPathTxt = Join-Path $ProjectDir 'browser-path.txt'
+$useExePath     = $null
+
+# -- A) Exakt passende Playwright-Chromium-Revision --
+$pwPkgJson  = Join-Path $ProjectDir 'node_modules\playwright-core\package.json'
 $pwRevision = $null
 if (Test-Path $pwPkgJson) {
     try {
         $pwPkg = Get-Content $pwPkgJson -Raw | ConvertFrom-Json
-        # Revision steht unter browsers[].revision fuer chromium
         $chromiumEntry = $pwPkg.browsers | Where-Object { $_.name -eq 'chromium' } | Select-Object -First 1
         if ($chromiumEntry) { $pwRevision = $chromiumEntry.revision }
     } catch {}
 }
-
-# Pruefen ob EXAKT die passende Chromium-Revision vorhanden ist
-$pwBrowserBase  = Join-Path $env:LOCALAPPDATA 'ms-playwright'
-$chromiumOk     = $false
+$pwBrowserBase = Join-Path $env:LOCALAPPDATA 'ms-playwright'
 if ($pwRevision -and (Test-Path $pwBrowserBase)) {
-    $expectedDir = Join-Path $pwBrowserBase "chromium-$pwRevision"
-    if (Test-Path (Join-Path $expectedDir 'chrome-win\chrome.exe')) {
-        $chromiumOk = $true
+    $candidate = Join-Path $pwBrowserBase "chromium-$pwRevision\chrome-win\chrome.exe"
+    if (Test-Path $candidate) { $useExePath = $candidate }
+}
+
+# -- B) Irgendein ms-playwright Chromium (neueste zuerst) --
+if (-not $useExePath -and (Test-Path $pwBrowserBase)) {
+    $dirs = Get-ChildItem $pwBrowserBase -Directory |
+            Where-Object { $_.Name -like 'chromium-*' } |
+            Sort-Object Name -Descending
+    foreach ($d in $dirs) {
+        $candidate = Join-Path $d.FullName 'chrome-win\chrome.exe'
+        if (Test-Path $candidate) { $useExePath = $candidate; break }
     }
 }
 
-if ($chromiumOk) {
-    Ok "Chromium Revision $pwRevision bereits vorhanden"
-} else {
-    if ($pwRevision) {
-        Info "Benoetigt: chromium-$pwRevision (installiere passende Revision fuer playwright-core)"
-    } else {
-        Info "Installiere Playwright Chromium (~150 MB)..."
+# -- C) System-Chrome --
+if (-not $useExePath) {
+    $pf86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+    $chromePaths = @(
+        (Join-Path $env:ProgramFiles 'Google\Chrome\Application\chrome.exe'),
+        (Join-Path $env:LOCALAPPDATA  'Google\Chrome\Application\chrome.exe')
+    )
+    if ($pf86) { $chromePaths += (Join-Path $pf86 'Google\Chrome\Application\chrome.exe') }
+    foreach ($c in $chromePaths) {
+        if ($c -and (Test-Path $c)) { $useExePath = $c; break }
     }
+}
 
-    # playwright-core stellt 'playwright-core' als bin-Script bereit.
-    # Wir rufen es ueber cmd.exe /c auf - das umgeht alle PS-Quoting-Fallen.
+# -- D) System-Edge --
+if (-not $useExePath) {
+    $pf86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+    $edgePaths = @(
+        (Join-Path $env:ProgramFiles 'Microsoft\Edge\Application\msedge.exe')
+    )
+    if ($pf86) { $edgePaths += (Join-Path $pf86 'Microsoft\Edge\Application\msedge.exe') }
+    foreach ($c in $edgePaths) {
+        if ($c -and (Test-Path $c)) { $useExePath = $c; break }
+    }
+}
+
+# -- E) Download als letzter Ausweg --
+if (-not $useExePath) {
+    Info "Kein Browser gefunden - lade Playwright Chromium herunter (~150 MB)..."
+    Info "(Das kann auf Firmennetzen laenger dauern - bitte warten)"
+
     $pwCoreBin = Join-Path $ProjectDir 'node_modules\.bin\playwright-core.cmd'
-    if (-not (Test-Path $pwCoreBin)) {
-        $pwCoreBin = $null
-    }
-
-    if ($pwCoreBin) {
+    if (Test-Path $pwCoreBin) {
         $rc = Invoke-Cmd "`"$pwCoreBin`" install chromium"
     } else {
-        # Fallback: node + cli.js aus playwright-core direkt
-        $cliJs = Join-Path $ProjectDir 'node_modules\playwright-core\cli.js'
+        $cliJs = Join-Path $ProjectDir 'node_modules\playwright-core\lib\cli\cli.js'
         if (-not (Test-Path $cliJs)) {
-            $cliJs = Join-Path $ProjectDir 'node_modules\playwright-core\lib\cli\cli.js'
+            $cliJs = Join-Path $ProjectDir 'node_modules\playwright-core\cli.js'
         }
         if (Test-Path $cliJs) {
             $rc = Invoke-Cmd "`"$nodeExe`" `"$cliJs`" install chromium"
         } else {
-            $rc = Invoke-Cmd "`"$npxCmd`" playwright-core install chromium"
+            $rc = 1
         }
     }
 
     if ($rc -ne 0) {
-        Fail "Chromium-Installation fehlgeschlagen (Code $rc)."
+        Fail "Browser-Download fehlgeschlagen (Code $rc)."
+        Write-Host ""
+        Write-Host " Schnelle Loesung: Google Chrome installieren (kein Admin noetig):"
+        Write-Host "   https://www.google.com/intl/de/chrome/?standalone=1"
+        Write-Host " Dann setup.bat erneut starten."
         Read-Host "Taste druecken zum Beenden"
         exit 1
     }
-    Ok "Chromium installiert"
+
+    # Nach Download nochmals suchen
+    if ($pwRevision -and (Test-Path $pwBrowserBase)) {
+        $candidate = Join-Path $pwBrowserBase "chromium-$pwRevision\chrome-win\chrome.exe"
+        if (Test-Path $candidate) { $useExePath = $candidate }
+    }
+    if (-not $useExePath -and (Test-Path $pwBrowserBase)) {
+        $dirs = Get-ChildItem $pwBrowserBase -Directory |
+                Where-Object { $_.Name -like 'chromium-*' } |
+                Sort-Object Name -Descending
+        foreach ($d in $dirs) {
+            $candidate = Join-Path $d.FullName 'chrome-win\chrome.exe'
+            if (Test-Path $candidate) { $useExePath = $candidate; break }
+        }
+    }
 }
+
+if (-not $useExePath) {
+    Fail "Kein kompatibler Browser gefunden."
+    Write-Host " Bitte Google Chrome installieren und setup.bat erneut starten."
+    Write-Host "   https://www.google.com/intl/de/chrome/?standalone=1"
+    Read-Host "Taste druecken zum Beenden"
+    exit 1
+}
+
+# Pfad speichern - App und codegen.ps1 lesen browser-path.txt
+[System.IO.File]::WriteAllText($browserPathTxt, $useExePath, [System.Text.Encoding]::UTF8)
+Ok "Browser: $useExePath"
 
 # =============================================================================
 # FERTIG

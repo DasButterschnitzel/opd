@@ -1,9 +1,6 @@
-# Playwright Selektor-Recorder - nimmt den Klickweg auf der ePaper-Seite auf.
-#
-# Hinweis: 'codegen' steckt im vollen 'playwright'-Paket, nicht in
-# 'playwright-core'. Wir nutzen npx playwright@<passende Version>.
-# Vor dem Start wird geprueft ob die passende Chromium-Revision vorhanden ist;
-# fehlt sie, wird sie automatisch installiert (einmalig ~150 MB).
+# Playwright Selektor-Recorder
+# Oeffnet https://epaper.op-online.de im Browser und zeichnet Klicks auf.
+# Voraussetzung: setup.bat wurde erfolgreich ausgefuehrt.
 
 $ProjectDir = Split-Path -Parent $PSScriptRoot
 Set-Location $ProjectDir
@@ -31,64 +28,28 @@ if (-not $nodeDir) {
 $env:Path = "$nodeDir;" + $env:Path
 $npxCmd = Join-Path $nodeDir 'npx.cmd'
 
-# Passende Playwright-Version aus playwright-core ermitteln
+# Browser-Pfad aus setup.ps1 laden
+$browserPathTxt = Join-Path $ProjectDir 'browser-path.txt'
+if (-not (Test-Path $browserPathTxt)) {
+    Write-Host "[FEHLER] browser-path.txt fehlt. Bitte zuerst setup.bat ausfuehren." -ForegroundColor Red
+    exit 1
+}
+$browserExe = (Get-Content $browserPathTxt -Raw).Trim()
+if (-not (Test-Path $browserExe)) {
+    Write-Host "[FEHLER] Browser nicht gefunden: $browserExe" -ForegroundColor Red
+    Write-Host "         Bitte setup.bat erneut ausfuehren." -ForegroundColor Red
+    exit 1
+}
+
+# Dem playwright-codegen-Prozess mitteilen welchen Browser er nutzen soll
+$env:PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH = $browserExe
+Write-Host "Browser: $browserExe" -ForegroundColor DarkGray
+
+# Playwright-Version aus playwright-core ermitteln
 $pwCorePkg = Join-Path $ProjectDir 'node_modules\playwright-core\package.json'
 $pwVer = '1.49.1'
 if (Test-Path $pwCorePkg) {
     try { $pwVer = ((Get-Content $pwCorePkg -Raw | ConvertFrom-Json).version) } catch {}
-}
-
-# Chromium-Revision fuer diese playwright-Version ermitteln
-$pwRevision = $null
-if (Test-Path $pwCorePkg) {
-    try {
-        $pwPkg = Get-Content $pwCorePkg -Raw | ConvertFrom-Json
-        $chromiumEntry = $pwPkg.browsers | Where-Object { $_.name -eq 'chromium' } | Select-Object -First 1
-        if ($chromiumEntry) { $pwRevision = $chromiumEntry.revision }
-    } catch {}
-}
-
-# Pruefen ob passende Chromium-Revision vorhanden ist
-$pwBrowserBase = Join-Path $env:LOCALAPPDATA 'ms-playwright'
-$chromiumOk    = $false
-if ($pwRevision -and (Test-Path $pwBrowserBase)) {
-    $expectedDir = Join-Path $pwBrowserBase "chromium-$pwRevision"
-    if (Test-Path (Join-Path $expectedDir 'chrome-win\chrome.exe')) {
-        $chromiumOk = $true
-    }
-}
-
-if (-not $chromiumOk) {
-    if ($pwRevision) {
-        Write-Host "Chromium-Revision $pwRevision fehlt - wird jetzt installiert (~150 MB)..." -ForegroundColor Yellow
-    } else {
-        Write-Host "Chromium wird installiert (~150 MB)..." -ForegroundColor Yellow
-    }
-    # playwright-core install chromium holt die exakt passende Revision
-    $pwCoreBin = Join-Path $ProjectDir 'node_modules\.bin\playwright-core.cmd'
-    if (Test-Path $pwCoreBin) {
-        cmd.exe /c "`"$pwCoreBin`" install chromium"
-    } else {
-        $cliJs = Join-Path $ProjectDir 'node_modules\playwright-core\lib\cli\cli.js'
-        if (-not (Test-Path $cliJs)) {
-            $cliJs = Join-Path $ProjectDir 'node_modules\playwright-core\cli.js'
-        }
-        if (Test-Path $cliJs) {
-            cmd.exe /c "`"$(Join-Path $nodeDir 'node.exe')`" `"$cliJs`" install chromium"
-        }
-    }
-    # Nochmals pruefen
-    if ($pwRevision -and (Test-Path $pwBrowserBase)) {
-        $expectedDir = Join-Path $pwBrowserBase "chromium-$pwRevision"
-        if (Test-Path (Join-Path $expectedDir 'chrome-win\chrome.exe')) {
-            $chromiumOk = $true
-        }
-    }
-    if (-not $chromiumOk) {
-        Write-Host "[FEHLER] Chromium-Installation fehlgeschlagen. Bitte setup.bat erneut ausfuehren." -ForegroundColor Red
-        exit 1
-    }
-    Write-Host "[OK] Chromium bereit" -ForegroundColor Green
 }
 
 Write-Host ""
@@ -104,7 +65,6 @@ Write-Host ""
 Write-Host "(npx playwright@$pwVer codegen)" -ForegroundColor DarkGray
 Write-Host ""
 
-# Ueber cmd.exe ausfuehren - umgeht PowerShell-Quoting-Fallen
 $cmdLine = "`"$npxCmd`" --yes playwright@$pwVer codegen https://epaper.op-online.de"
 Write-Host "> $cmdLine" -ForegroundColor DarkGray
 cmd.exe /c $cmdLine

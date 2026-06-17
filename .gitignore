@@ -4,3 +4,4 @@ downloads/
 chromium-browser/
 *.log
 .env
+browser-path.txt
