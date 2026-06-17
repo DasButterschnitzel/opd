@@ -1,27 +1,31 @@
 @echo off
 setlocal enabledelayedexpansion
 title Playwright Selektor-Recorder
+chcp 65001 >nul 2>&1
+
+cd /d "%~dp0"
 
 :: Node.js in PATH aufnehmen falls noetig
 where node >nul 2>&1
 if errorlevel 1 (
     for %%P in (
+        "%LOCALAPPDATA%\Programs\nodejs"
         "%ProgramFiles%\nodejs"
         "%ProgramFiles(x86)%\nodejs"
-        "%LOCALAPPDATA%\Programs\nodejs"
         "%APPDATA%\nvm\current"
         "%LOCALAPPDATA%\nvm\current"
+        "%LOCALAPPDATA%\fnm\aliases\default"
     ) do (
-        if exist "%%~P\node.exe" set "PATH=%%~P;!PATH!"
+        if exist "%%~P\node.exe" (
+            set "PATH=%%~P;!PATH!"
+            goto :node_found
+        )
     )
-)
-
-where node >nul 2>&1
-if errorlevel 1 (
-    echo [FEHLER] Node.js nicht gefunden. Bitte zuerst setup.bat ausfuehren.
+    echo [FEHLER] Node.js nicht gefunden. Bitte zuerst install-deps.bat ausfuehren.
     pause
     exit /b 1
 )
+:node_found
 
 echo Oeffne Browser fuer https://epaper.op-online.de ...
 echo.
