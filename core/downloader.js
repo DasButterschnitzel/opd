@@ -257,10 +257,6 @@ async function runDownload(config, logger, abortSignal) {
     await page.locator('rebrush-download i').first().click();
     const options = await getDropdownOptions(page, logger);
 
-    // Dropdown schliessen bevor wir es pro Option neu oeffnen
-    await page.keyboard.press('Escape').catch(() => {});
-    await page.waitForTimeout(200);
-
     // ------------------------------------------------------------------
     // 6) ALLE OPTIONEN HERUNTERLADEN
     // ------------------------------------------------------------------
@@ -275,10 +271,16 @@ async function runDownload(config, logger, abortSignal) {
         continue;
       }
 
-      logger.info('Lade herunter: "' + optText + '"');
-      await page.locator('rebrush-download i').first().click();
-      await page.waitForTimeout(300);
+      // Sicherstellen, dass das Dropdown offen ist (koennte nach einem Download geschlossen sein)
+      const menuVisible = await page.locator('rebrush-download li, rebrush-download button, rebrush-download a')
+        .first().isVisible({ timeout: 800 }).catch(() => false);
+      if (!menuVisible) {
+        logger.info('Dropdown geschlossen – oeffne neu');
+        await page.locator('rebrush-download i').first().click();
+        await page.waitForTimeout(300);
+      }
 
+      logger.info('Lade herunter: "' + optText + '"');
       const [dl] = await Promise.all([
         page.waitForEvent('download', { timeout: 60_000 }),
         page.locator('rebrush-download').getByText(optText).first().click(),
