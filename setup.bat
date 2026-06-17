@@ -7,13 +7,39 @@ echo  OP ePaper Tool – Einrichtung
 echo ============================================================
 echo.
 
-:: Node.js pruefen
+:: Node.js pruefen – zuerst im PATH, dann an typischen Installationsorten
 where node >nul 2>&1
 if errorlevel 1 (
-    echo [FEHLER] Node.js nicht gefunden.
-    echo Bitte von https://nodejs.org herunterladen und installieren.
-    pause
-    exit /b 1
+    :: Typische Installationspfade durchsuchen
+    set "NODE_FOUND="
+    for %%P in (
+        "%ProgramFiles%\nodejs"
+        "%ProgramFiles(x86)%\nodejs"
+        "%LOCALAPPDATA%\Programs\nodejs"
+        "%APPDATA%\nvm\current"
+        "%LOCALAPPDATA%\nvm\current"
+    ) do (
+        if not defined NODE_FOUND (
+            if exist "%%~P\node.exe" (
+                set "NODE_FOUND=%%~P"
+            )
+        )
+    )
+    if defined NODE_FOUND (
+        set "PATH=!NODE_FOUND!;!PATH!"
+        echo [INFO] Node.js gefunden unter: !NODE_FOUND!
+        echo        Zum PATH hinzugefuegt fuer diese Sitzung.
+    ) else (
+        echo [FEHLER] Node.js nicht gefunden.
+        echo.
+        echo Bitte installieren von: https://nodejs.org
+        echo Empfohlen: LTS-Version, Option "Add to PATH" waehlen.
+        echo.
+        echo Falls bereits installiert, einmal neu anmelden oder
+        echo eine neue Eingabeaufforderung oeffnen und erneut versuchen.
+        pause
+        exit /b 1
+    )
 )
 for /f "tokens=*" %%v in ('node --version') do set NODE_VER=%%v
 echo [OK] Node.js %NODE_VER% gefunden
