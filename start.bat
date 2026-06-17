@@ -17,8 +17,10 @@ if not exist "%ELECTRON_EXE%" (
     exit /b 1
 )
 
-:: electron.exe ist eine .exe (kein .cmd) - laeuft direkt, kein "call" noetig.
-"%ELECTRON_EXE%" "%~dp0"
+:: Wir sind bereits im Projektordner (cd oben). Daher "." als App-Pfad.
+:: NICHT "%~dp0" uebergeben - der abschliessende Backslash wuerde als
+:: Escape fuer das Anfuehrungszeichen gelesen ("...\opd\" -> kaputt).
+"%ELECTRON_EXE%" .
 set "EC=%errorlevel%"
 
 if not "%EC%"=="0" (
