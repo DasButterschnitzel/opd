@@ -14,7 +14,7 @@
  *     4. Den erzeugten Code als Grundlage für die TODOs unten verwenden
  */
 
-const { chromium } = require('playwright');
+const { chromium } = require('playwright-core');
 const fs = require('fs');
 const path = require('path');
 const { app } = require('electron');

@@ -1,236 +1,259 @@
 # =============================================================================
-#  OP ePaper Tool – Einrichtung (PowerShell, ohne Adminrechte)
+#  OP ePaper Tool – Einrichtung  (PowerShell, kein Admin noetig)
 #
-#  Erledigt alles in einem Durchlauf:
-#    1. Node.js finden (oder ohne Admin als ZIP nach LOCALAPPDATA installieren)
-#    2. npm-Pakete installieren
-#    3. Electron-Binary sicherstellen (lädt es notfalls direkt von GitHub –
-#       der npm-Postinstall wird in Firmennetzen oft geblockt)
-#    4. Playwright Chromium installieren
-#
-#  Wird über setup.bat aufgerufen. Direkt:
-#    powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup.ps1
+#  Aufruf:  powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup.ps1
 # =============================================================================
 
-$ErrorActionPreference = 'Stop'
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-# Projekt-Wurzel = ein Verzeichnis über diesem Skript
 $ProjectDir = Split-Path -Parent $PSScriptRoot
 Set-Location $ProjectDir
 
-function Step($t) { Write-Host "`n=== $t ===" -ForegroundColor Cyan }
-function Ok($t)   { Write-Host "[OK] $t"   -ForegroundColor Green }
-function Info($t) { Write-Host "     $t"   -ForegroundColor Gray }
-function Fail($t) { Write-Host "[FEHLER] $t" -ForegroundColor Red }
+# Explizite Fehlerbehandlung statt globalem Stop – so sieht man was schiefgeht
+$ErrorActionPreference = 'Continue'
 
-Write-Host "============================================================"
-Write-Host " OP ePaper Tool - Einrichtung (kein Admin noetig)"
-Write-Host "============================================================"
+function Step($n, $t) { Write-Host "`n=== $n  $t ===" -ForegroundColor Cyan }
+function Ok($t)        { Write-Host "[OK] $t"         -ForegroundColor Green }
+function Info($t)      { Write-Host "     $t" }
+function Fail($t)      { Write-Host "[FEHLER] $t"     -ForegroundColor Red }
+function Run($cmd)     { Write-Host "     > $cmd"     -ForegroundColor DarkGray }
 
-# -----------------------------------------------------------------------------
-# 1) NODE.JS
-# -----------------------------------------------------------------------------
+# ---- Hilfsfunktion: Befehl ueber cmd.exe ausfuehren (umgeht PS-Quoting-Fallen) ----
+function Invoke-Cmd {
+    param([string]$Cmd)
+    Run $Cmd
+    $result = cmd.exe /c $Cmd
+    Write-Host $result
+    return $LASTEXITCODE
+}
+
+# =============================================================================
+# 1) NODE.JS FINDEN ODER PORTABEL INSTALLIEREN
+# =============================================================================
+Step 1 "Node.js"
+
 function Find-NodeDir {
-    # a) Bereits im PATH?
-    $cmd = Get-Command node -ErrorAction SilentlyContinue
-    if ($cmd) { return (Split-Path -Parent $cmd.Source) }
+    # Zuerst im System-PATH
+    $n = Get-Command node -ErrorAction SilentlyContinue
+    if ($n) { return (Split-Path -Parent $n.Source) }
 
-    # b) Bekannte benutzer-lokale Orte (nur gesetzte Basis-Pfade verwenden)
-    $bases = @(
-        @{ Root = $env:LOCALAPPDATA;        Sub = 'Programs\nodejs' },
-        @{ Root = $env:ProgramFiles;        Sub = 'nodejs' },
-        @{ Root = ${env:ProgramFiles(x86)}; Sub = 'nodejs' },
-        @{ Root = $env:APPDATA;             Sub = 'nvm\current' },
-        @{ Root = $env:LOCALAPPDATA;        Sub = 'nvm\current' }
-    )
-    foreach ($b in $bases) {
-        if ([string]::IsNullOrEmpty($b.Root)) { continue }
-        $dir = Join-Path $b.Root $b.Sub
-        if (Test-Path (Join-Path $dir 'node.exe')) { return $dir }
+    # Dann bekannte Installationsorte (null-sichere Iteration)
+    $roots = @($env:LOCALAPPDATA, $env:ProgramFiles, $env:APPDATA)
+    $subs  = @('Programs\nodejs', 'nodejs', 'nvm\current')
+    foreach ($r in $roots) {
+        if ([string]::IsNullOrEmpty($r)) { continue }
+        foreach ($s in $subs) {
+            $candidate = Join-Path $r $s
+            if (Test-Path (Join-Path $candidate 'node.exe')) { return $candidate }
+        }
     }
     return $null
 }
 
-function Install-NodePortable {
-    $installDir = Join-Path $env:LOCALAPPDATA 'Programs\nodejs'
-    Info "Node.js nicht gefunden - installiere portabel nach:"
-    Info "  $installDir"
-
-    Info "Ermittle aktuelle LTS-Version..."
-    $index = Invoke-RestMethod 'https://nodejs.org/dist/index.json' -UseBasicParsing
-    $lts   = $index | Where-Object { $_.lts } | Select-Object -First 1
-    $ver   = $lts.version
-    Info "LTS: $ver"
-
-    $zipUrl  = "https://nodejs.org/dist/$ver/node-$ver-win-x64.zip"
-    $zipPath = Join-Path $env:TEMP 'node-portable.zip'
-    $extract = Join-Path $env:TEMP 'node-portable-extract'
-
-    Info "Lade $zipUrl ..."
-    Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
-
-    if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
-    Info "Entpacke..."
-    Expand-Archive -Path $zipPath -DestinationPath $extract -Force
-
-    $inner = Join-Path $extract "node-$ver-win-x64"
-    if (-not (Test-Path (Join-Path $inner 'node.exe'))) {
-        throw "node.exe nicht im heruntergeladenen Archiv gefunden."
-    }
-
-    if (Test-Path $installDir) { Remove-Item $installDir -Recurse -Force }
-    New-Item -ItemType Directory -Path (Split-Path -Parent $installDir) -Force | Out-Null
-    Move-Item $inner $installDir
-    Remove-Item $zipPath, $extract -Recurse -Force -ErrorAction SilentlyContinue
-
-    # Benutzer-PATH dauerhaft erweitern (kein Admin, HKCU)
-    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-    if ($userPath -notlike "*$installDir*") {
-        [Environment]::SetEnvironmentVariable('Path', "$installDir;$userPath", 'User')
-        Info "Benutzer-PATH dauerhaft erweitert."
-    }
-    return $installDir
-}
-
-Step "1/4  Node.js"
 $nodeDir = Find-NodeDir
+
 if (-not $nodeDir) {
+    Info "Node.js nicht gefunden – installiere portabel (ZIP, kein Admin)..."
+
     try {
-        $nodeDir = Install-NodePortable
+        $index  = Invoke-RestMethod 'https://nodejs.org/dist/index.json' -UseBasicParsing
+        $lts    = $index | Where-Object { $_.lts } | Select-Object -First 1
+        $ver    = $lts.version
+        $zipUrl = "https://nodejs.org/dist/$ver/node-$ver-win-x64.zip"
+        $zip    = Join-Path $env:TEMP 'node-portable.zip'
+        $exdir  = Join-Path $env:TEMP 'node-portable-extract'
+        $target = Join-Path $env:LOCALAPPDATA 'Programs\nodejs'
+
+        Info "Lade Node.js $ver ..."
+        Invoke-WebRequest -Uri $zipUrl -OutFile $zip -UseBasicParsing
+
+        if (Test-Path $exdir) { Remove-Item $exdir -Recurse -Force }
+        Expand-Archive -Path $zip -DestinationPath $exdir -Force
+        $inner = Join-Path $exdir "node-$ver-win-x64"
+
+        if (Test-Path $target) { Remove-Item $target -Recurse -Force }
+        New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+        Move-Item $inner $target
+
+        Remove-Item $zip -Force -ErrorAction SilentlyContinue
+        Remove-Item $exdir -Recurse -Force -ErrorAction SilentlyContinue
+
+        # Dauerhaft in Benutzer-PATH eintragen (HKCU, kein Admin)
+        $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+        if ($userPath -notlike "*$target*") {
+            [Environment]::SetEnvironmentVariable('Path', "$target;$userPath", 'User')
+        }
+        $nodeDir = $target
     } catch {
-        Fail "Node.js konnte nicht automatisch installiert werden: $($_.Exception.Message)"
+        Fail "Automatische Installation fehlgeschlagen: $($_.Exception.Message)"
         Write-Host ""
-        Write-Host "Manuelle Alternative (kein Admin):"
-        Write-Host "  1. https://nodejs.org -> LTS -> 'Windows Binary (.zip)' laden"
-        Write-Host "  2. Entpacken nach:  $(Join-Path $env:LOCALAPPDATA 'Programs\nodejs')"
+        Write-Host "Manuell (kein Admin):"
+        Write-Host "  1. https://nodejs.org  -> LTS -> Windows Binary (.zip)"
+        Write-Host "  2. Entpacken nach: $env:LOCALAPPDATA\Programs\nodejs"
         Write-Host "  3. setup.bat erneut starten"
+        Read-Host "Taste druecken zum Beenden"
         exit 1
     }
 }
-# Node-Verzeichnis für diese Sitzung an den Anfang des PATH
-$env:Path = "$nodeDir;$env:Path"
 
-$nodeExe = Join-Path $nodeDir 'node.exe'
-$npmCmd  = Join-Path $nodeDir 'npm.cmd'
-$nodeVer = (& $nodeExe --version)
+# Fuer diese Sitzung in PATH aufnehmen
+$env:Path = "$nodeDir;" + $env:Path
+
+$nodeExe  = Join-Path $nodeDir 'node.exe'
+$npmCmd   = Join-Path $nodeDir 'npm.cmd'
+$npxCmd   = Join-Path $nodeDir 'npx.cmd'
+$nodeVer  = & $nodeExe --version
+
 Ok "Node.js $nodeVer  ($nodeDir)"
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # 2) NPM-PAKETE
-# -----------------------------------------------------------------------------
-Step "2/4  npm-Pakete"
-$electronPkg = Join-Path $ProjectDir 'node_modules\electron\package.json'
-$playwrightPkg = Join-Path $ProjectDir 'node_modules\playwright\package.json'
+# =============================================================================
+Step 2 "npm-Pakete"
+
+$electronPkg    = Join-Path $ProjectDir 'node_modules\electron\package.json'
+$playwrightPkg  = Join-Path $ProjectDir 'node_modules\playwright-core\package.json'
 
 if ((-not (Test-Path $electronPkg)) -or (-not (Test-Path $playwrightPkg))) {
-    Info "Installiere npm-Pakete (dauert 1-3 Minuten)..."
-    # Binary-Downloads beim Postinstall ueberspringen - wir holen sie separat in
-    # Schritt 3 und 4 (zuverlaessiger in Firmennetzen mit Proxy/Block).
-    $env:ELECTRON_SKIP_BINARY_DOWNLOAD = '1'
+    Info "Installiere npm-Pakete (1-3 Minuten)..."
+    # Binary-Postinstalls deaktivieren – wir holen die Binaries manuell in
+    # Schritt 3 und 4 (Firmennetze blocken diese Downloads haeufig).
+    $env:ELECTRON_SKIP_BINARY_DOWNLOAD    = '1'
     $env:PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = '1'
-    & $npmCmd install --no-audit --no-fund
-    if ($LASTEXITCODE -ne 0) { Fail "npm install fehlgeschlagen."; exit 1 }
+
+    $rc = Invoke-Cmd "`"$npmCmd`" install --no-audit --no-fund"
+    if ($rc -ne 0) {
+        Fail "npm install fehlgeschlagen (Code $rc)."
+        Read-Host "Taste druecken zum Beenden"
+        exit 1
+    }
     Ok "npm-Pakete installiert"
 } else {
     Ok "node_modules bereits vorhanden"
 }
 
-# -----------------------------------------------------------------------------
-# 3) ELECTRON-BINARY
-# -----------------------------------------------------------------------------
-Step "3/4  Electron-Binary"
+# =============================================================================
+# 3) ELECTRON BINARY
+# =============================================================================
+Step 3 "Electron-Binary"
+
 $electronDir = Join-Path $ProjectDir 'node_modules\electron'
 $distDir     = Join-Path $electronDir 'dist'
 $electronExe = Join-Path $distDir 'electron.exe'
 $pathTxt     = Join-Path $electronDir 'path.txt'
 
-function Repair-PathTxt {
-    # electron/index.js liest path.txt und macht: join(__dirname, 'dist', <inhalt>)
-    # -> der Inhalt MUSS exakt "electron.exe" sein (ohne 'dist\').
-    Set-Content -Path $pathTxt -Value 'electron.exe' -NoNewline -Encoding ascii
+# path.txt muss exakt "electron.exe" enthalten.
+# Electrons index.js baut den Pfad als: path.join(__dirname, 'dist', <inhalt von path.txt>)
+# -> alles andere als "electron.exe" fuehrt zu "Electron failed to install correctly"
+function Write-PathTxt {
+    [System.IO.File]::WriteAllText($pathTxt, 'electron.exe',
+        [System.Text.Encoding]::ASCII)
+    Info "path.txt geschrieben: $pathTxt"
 }
 
 if (Test-Path $electronExe) {
-    Repair-PathTxt
-    Ok "Electron-Binary vorhanden – path.txt geprueft"
+    Write-PathTxt
+    Ok "Electron-Binary vorhanden, path.txt geprueft"
 } else {
-    $ever = (Get-Content $electronPkg -Raw | ConvertFrom-Json).version
-    Info "Benoetigte Version: $ever"
-    $zipUrl  = "https://github.com/electron/electron/releases/download/v$ever/electron-v$ever-win32-x64.zip"
+    # Version aus package.json lesen (ohne Backtick-for, der ) nicht vertraegt)
+    $ePkgContent = Get-Content $electronPkg -Raw | ConvertFrom-Json
+    $eVer = $ePkgContent.version
+    Info "Benoetigt: electron $eVer"
+
+    $zipUrl  = "https://github.com/electron/electron/releases/download/v$eVer/electron-v$eVer-win32-x64.zip"
     $zipPath = Join-Path $env:TEMP 'electron-bin.zip'
-    $extract = Join-Path $env:TEMP 'electron-bin-extract'
+    $exdir   = Join-Path $env:TEMP 'electron-bin-extract'
 
     try {
         Info "Lade Electron-Binary (~100 MB) von GitHub..."
         Info $zipUrl
         Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
 
-        if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
-        Info "Entpacke..."
-        Expand-Archive -Path $zipPath -DestinationPath $extract -Force
+        if (Test-Path $exdir) { Remove-Item $exdir -Recurse -Force }
+        Expand-Archive -Path $zipPath -DestinationPath $exdir -Force
+        Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
 
-        if (-not (Test-Path (Join-Path $extract 'electron.exe'))) {
-            throw "electron.exe nicht im Archiv gefunden."
+        if (-not (Test-Path (Join-Path $exdir 'electron.exe'))) {
+            throw "electron.exe nicht im Archiv gefunden. Inhalt: $(Get-ChildItem $exdir | Select-Object -ExpandProperty Name)"
         }
 
         New-Item -ItemType Directory -Path $distDir -Force | Out-Null
-        Info "Kopiere nach dist\ ..."
-        Copy-Item -Path (Join-Path $extract '*') -Destination $distDir -Recurse -Force
+        Copy-Item (Join-Path $exdir '*') -Destination $distDir -Recurse -Force
+        Remove-Item $exdir -Recurse -Force -ErrorAction SilentlyContinue
 
-        Repair-PathTxt
-        Remove-Item $zipPath, $extract -Recurse -Force -ErrorAction SilentlyContinue
-
-        if (Test-Path $electronExe) {
-            Ok "Electron-Binary installiert"
-        } else {
-            throw "electron.exe nach dem Kopieren nicht vorhanden."
-        }
+        Write-PathTxt
+        Ok "Electron-Binary installiert: $electronExe"
     } catch {
         Fail "Electron-Binary konnte nicht geladen werden: $($_.Exception.Message)"
         Write-Host ""
-        Write-Host "Manuelle Alternative:"
-        Write-Host "  1. Im Browser oeffnen:  $zipUrl"
-        Write-Host "  2. ZIP-Inhalt entpacken nach:  $distDir"
-        Write-Host "     (so dass dort electron.exe liegt)"
-        Write-Host "  3. setup.bat erneut starten (schreibt dann path.txt)"
+        Write-Host "Manuell:"
+        Write-Host "  1. Browser: $zipUrl"
+        Write-Host "  2. ZIP-Inhalt entpacken nach: $distDir"
+        Write-Host "     (so dass $electronExe entsteht)"
+        Write-Host "  3. setup.bat erneut starten"
+        Read-Host "Taste druecken zum Beenden"
         exit 1
     }
 }
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # 4) PLAYWRIGHT CHROMIUM
-# -----------------------------------------------------------------------------
-Step "4/4  Playwright Chromium"
-$pwCli = Join-Path $ProjectDir 'node_modules\playwright\cli.js'
-if (-not (Test-Path $pwCli)) {
-    $pwCli = Join-Path $ProjectDir 'node_modules\playwright-core\cli.js'
-}
-if (-not (Test-Path $pwCli)) {
-    Fail "Playwright-CLI nicht gefunden – npm install unvollstaendig?"
-    exit 1
+# =============================================================================
+Step 4 "Playwright Chromium"
+
+# Chromium-Verzeichnis pruefen
+$pwBrowserBase = Join-Path $env:LOCALAPPDATA 'ms-playwright'
+$chromiumExists = $false
+if (Test-Path $pwBrowserBase) {
+    $chromiumDir = Get-ChildItem $pwBrowserBase -Directory |
+                   Where-Object { $_.Name -like 'chromium*' } |
+                   Select-Object -First 1
+    if ($chromiumDir) { $chromiumExists = $true }
 }
 
-Info "Installiere/aktualisiere Chromium (idempotent)..."
-& $nodeExe $pwCli install chromium
-if ($LASTEXITCODE -ne 0) {
-    Fail "Chromium-Installation fehlgeschlagen."
-    exit 1
-}
-Ok "Chromium bereit"
+if (-not $chromiumExists) {
+    Info "Installiere Playwright Chromium (~150 MB)..."
 
-# -----------------------------------------------------------------------------
+    # playwright-core stellt 'playwright-core' als bin-Script bereit.
+    # Wir rufen es ueber cmd.exe /c auf – das umgeht alle PS-Quoting-Fallen.
+    $pwCoreBin = Join-Path $ProjectDir 'node_modules\.bin\playwright-core.cmd'
+    if (-not (Test-Path $pwCoreBin)) {
+        # Aeltere Versionen haben das CLI direkt in playwright-core/cli.js
+        $pwCoreBin = $null
+    }
+
+    if ($pwCoreBin) {
+        $rc = Invoke-Cmd "`"$pwCoreBin`" install chromium"
+    } else {
+        # Fallback: node + cli.js aus playwright-core direkt
+        $cliJs = Join-Path $ProjectDir 'node_modules\playwright-core\cli.js'
+        if (-not (Test-Path $cliJs)) {
+            $cliJs = Join-Path $ProjectDir 'node_modules\playwright-core\lib\cli\cli.js'
+        }
+        if (Test-Path $cliJs) {
+            $rc = Invoke-Cmd "`"$nodeExe`" `"$cliJs`" install chromium"
+        } else {
+            # Letzter Fallback: npx
+            $rc = Invoke-Cmd "`"$npxCmd`" playwright-core install chromium"
+        }
+    }
+
+    if ($rc -ne 0) {
+        Fail "Chromium-Installation fehlgeschlagen (Code $rc)."
+        Read-Host "Taste druecken zum Beenden"
+        exit 1
+    }
+    Ok "Chromium installiert"
+} else {
+    Ok "Chromium bereits vorhanden ($($chromiumDir.FullName))"
+}
+
+# =============================================================================
 # FERTIG
-# -----------------------------------------------------------------------------
+# =============================================================================
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Green
 Write-Host " Alle Abhaengigkeiten bereit!" -ForegroundColor Green
 Write-Host "============================================================" -ForegroundColor Green
 Write-Host ""
-Write-Host " Naechster Schritt: Selektoren ermitteln"
-Write-Host "   codegen.bat starten, einloggen, Klickweg aufnehmen,"
-Write-Host "   Ergebnis in core\downloader.js eintragen."
+Write-Host " Naechster Schritt:  codegen.bat  (Selektoren aufnehmen)"
+Write-Host " Dann:               start.bat    (App starten)"
 Write-Host ""
-Write-Host " Dann App starten:  start.bat"
-Write-Host ""
-exit 0

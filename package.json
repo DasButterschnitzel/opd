@@ -9,7 +9,7 @@
     "dist:win": "electron-builder --win --x64"
   },
   "dependencies": {
-    "playwright": "1.49.1"
+    "playwright-core": "1.49.1"
   },
   "devDependencies": {
     "electron": "31.7.7",
