@@ -225,6 +225,8 @@ async function runDownload(config, logger, abortSignal) {
     logger.info('Waehle aktuelle Ausgabe');
     await page.getByRole('link', { name: /Offenbach-Post/ }).first().click({ timeout: 20_000 });
     await page.waitForLoadState('networkidle', { timeout: 30_000 });
+    // Warten bis die rebrush-Komponenten gerendert sind (Angular bootstrapping)
+    await page.locator('rebrush-department-list-control').waitFor({ timeout: 20_000 });
 
     // ------------------------------------------------------------------
     // 4) DREIEICH-SEKTION FINDEN
@@ -245,6 +247,8 @@ async function runDownload(config, logger, abortSignal) {
 
     await dreieichItem.click();
     await page.waitForLoadState('networkidle', { timeout: 20_000 });
+    // Warten bis das rebrush-download-Element sichtbar ist
+    await page.locator('rebrush-download').first().waitFor({ timeout: 15_000 });
 
     // ------------------------------------------------------------------
     // 5) DOWNLOAD-OPTIONEN ERMITTELN
