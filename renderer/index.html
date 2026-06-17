@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+  <title>OP ePaper Tool – Dreieich</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+
+    <!-- HEADER -->
+    <header class="header">
+      <h1>OP ePaper Tool</h1>
+      <span class="subtitle">Dreieich · Stadtverwaltung</span>
+    </header>
+
+    <!-- TABS -->
+    <nav class="tabs">
+      <button class="tab-btn active" data-tab="home">Start</button>
+      <button class="tab-btn" data-tab="settings">Einstellungen</button>
+      <button class="tab-btn" data-tab="log">Protokoll</button>
+    </nav>
+
+    <!-- TAB: START -->
+    <section class="tab-content active" id="tab-home">
+      <div class="status-card">
+        <div class="status-row">
+          <span class="label">Letzter Erfolg:</span>
+          <span id="last-success" class="value">–</span>
+        </div>
+        <div class="status-row">
+          <span class="label">Zielordner:</span>
+          <span id="output-dir" class="value mono">–</span>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button id="btn-download" class="btn btn-primary">
+          <span class="icon">⬇</span> Seite jetzt herunterladen
+        </button>
+        <button id="btn-open-folder" class="btn btn-secondary">
+          <span class="icon">📁</span> Zielordner öffnen
+        </button>
+      </div>
+
+      <div id="progress-wrap" class="progress-wrap hidden">
+        <div class="spinner"></div>
+        <span id="progress-label">Download läuft…</span>
+      </div>
+
+      <div id="result-banner" class="result-banner hidden"></div>
+
+      <div class="log-live-wrap">
+        <div class="log-header">Live-Log</div>
+        <div id="live-log" class="log-box"></div>
+      </div>
+    </section>
+
+    <!-- TAB: EINSTELLUNGEN -->
+    <section class="tab-content" id="tab-settings">
+      <form id="settings-form" autocomplete="off">
+        <fieldset>
+          <legend>Zugangsdaten (OP-Online ePaper)</legend>
+          <div class="field">
+            <label for="inp-user">Benutzername / E-Mail</label>
+            <input id="inp-user" type="text" name="username" autocomplete="username" />
+          </div>
+          <div class="field">
+            <label for="inp-pass">Passwort</label>
+            <input id="inp-pass" type="password" name="password" autocomplete="current-password" />
+            <small>Wird verschlüsselt gespeichert (Windows DPAPI / safeStorage).</small>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Zielordner</legend>
+          <div class="field field-row">
+            <input id="inp-dir" type="text" name="outputDir" readonly />
+            <button type="button" id="btn-select-dir" class="btn btn-secondary">Auswählen…</button>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Automatischer Tagesdownload</legend>
+          <div class="field field-row">
+            <label for="inp-hour">Uhrzeit:</label>
+            <input id="inp-hour" type="number" name="scheduleHour" min="0" max="23" style="width:4rem" />
+            <span>:</span>
+            <input id="inp-min" type="number" name="scheduleMinute" min="0" max="59" style="width:4rem" />
+            <span class="hint">Uhr (Ausgabe ist ab ca. 04:00 online)</span>
+          </div>
+          <button type="button" id="btn-create-task" class="btn btn-secondary">
+            Windows-Aufgabe einrichten
+          </button>
+          <div id="task-result" class="inline-msg hidden"></div>
+        </fieldset>
+
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary">Speichern</button>
+          <span id="save-msg" class="inline-msg hidden">Gespeichert.</span>
+        </div>
+      </form>
+    </section>
+
+    <!-- TAB: PROTOKOLL -->
+    <section class="tab-content" id="tab-log">
+      <div class="log-header">
+        Letzte Einträge
+        <button id="btn-refresh-log" class="btn btn-xs">Aktualisieren</button>
+      </div>
+      <div id="full-log" class="log-box log-box-tall"></div>
+    </section>
+
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
