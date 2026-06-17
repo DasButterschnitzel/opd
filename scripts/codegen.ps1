@@ -1,4 +1,4 @@
-# Playwright Selektor-Recorder – nimmt den Klickweg auf der ePaper-Seite auf.
+# Playwright Selektor-Recorder - nimmt den Klickweg auf der ePaper-Seite auf.
 $ErrorActionPreference = 'Stop'
 $ProjectDir = Split-Path -Parent $PSScriptRoot
 Set-Location $ProjectDir

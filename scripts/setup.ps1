@@ -1,5 +1,5 @@
 # =============================================================================
-#  OP ePaper Tool – Einrichtung  (PowerShell, kein Admin noetig)
+#  OP ePaper Tool - Einrichtung  (PowerShell, kein Admin noetig)
 #
 #  Aufruf:  powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup.ps1
 # =============================================================================
@@ -7,7 +7,7 @@
 $ProjectDir = Split-Path -Parent $PSScriptRoot
 Set-Location $ProjectDir
 
-# Explizite Fehlerbehandlung statt globalem Stop – so sieht man was schiefgeht
+# Explizite Fehlerbehandlung statt globalem Stop - so sieht man was schiefgeht
 $ErrorActionPreference = 'Continue'
 
 function Step($n, $t) { Write-Host "`n=== $n  $t ===" -ForegroundColor Cyan }
@@ -51,7 +51,7 @@ function Find-NodeDir {
 $nodeDir = Find-NodeDir
 
 if (-not $nodeDir) {
-    Info "Node.js nicht gefunden – installiere portabel (ZIP, kein Admin)..."
+    Info "Node.js nicht gefunden - installiere portabel (ZIP, kein Admin)..."
 
     try {
         $index  = Invoke-RestMethod 'https://nodejs.org/dist/index.json' -UseBasicParsing
@@ -114,7 +114,7 @@ $playwrightPkg  = Join-Path $ProjectDir 'node_modules\playwright-core\package.js
 
 if ((-not (Test-Path $electronPkg)) -or (-not (Test-Path $playwrightPkg))) {
     Info "Installiere npm-Pakete (1-3 Minuten)..."
-    # Binary-Postinstalls deaktivieren – wir holen die Binaries manuell in
+    # Binary-Postinstalls deaktivieren - wir holen die Binaries manuell in
     # Schritt 3 und 4 (Firmennetze blocken diese Downloads haeufig).
     $env:ELECTRON_SKIP_BINARY_DOWNLOAD    = '1'
     $env:PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = '1'
@@ -213,7 +213,7 @@ if (-not $chromiumExists) {
     Info "Installiere Playwright Chromium (~150 MB)..."
 
     # playwright-core stellt 'playwright-core' als bin-Script bereit.
-    # Wir rufen es ueber cmd.exe /c auf – das umgeht alle PS-Quoting-Fallen.
+    # Wir rufen es ueber cmd.exe /c auf - das umgeht alle PS-Quoting-Fallen.
     $pwCoreBin = Join-Path $ProjectDir 'node_modules\.bin\playwright-core.cmd'
     if (-not (Test-Path $pwCoreBin)) {
         # Aeltere Versionen haben das CLI direkt in playwright-core/cli.js
