@@ -28,21 +28,37 @@ if errorlevel 1 (
 
 set "ELECTRON_BIN=%~dp0node_modules\.bin\electron.cmd"
 if not exist "%ELECTRON_BIN%" (
-    echo [FEHLER] Electron nicht gefunden in: %ELECTRON_BIN%
+    echo [FEHLER] Electron nicht gefunden: %ELECTRON_BIN%
     echo Bitte zuerst install-deps.bat ausfuehren.
     pause
     exit /b 1
 )
 
-echo Starte Electron...
-echo (Fehlermeldungen erscheinen hier falls etwas schiefgeht)
-echo --------------------------------------------------------
-"%ELECTRON_BIN%" . --enable-logging
+:: Fehlerausgabe in Logdatei schreiben (parallel zur Konsole)
+set "CRASH_LOG=%USERPROFILE%\op-epaper-crash.log"
+echo. >> "%CRASH_LOG%"
+echo === Start: %DATE% %TIME% === >> "%CRASH_LOG%"
+
+echo Starte OP ePaper Tool...
+echo (Fenster bleibt offen wenn Fehler auftreten)
+echo -----------------------------------------------
+
+:: WICHTIG: "call" damit die Rueckkehr zur .bat gewaehrleistet ist
+::          Fehlerausgabe in Logdatei UND Konsole gleichzeitig
+call "%ELECTRON_BIN%" . 2>> "%CRASH_LOG%"
+
 set "EC=%errorlevel%"
-echo --------------------------------------------------------
-if not "%EC%"=="0" (
+echo -----------------------------------------------
+if "%EC%"=="0" (
+    echo Electron normal beendet.
+) else (
     echo.
     echo [FEHLER] Electron beendet mit Code %EC%
-    echo Crash-Log: %USERPROFILE%\op-epaper-crash.log
+    echo.
+    echo Letzte Zeilen aus dem Crash-Log:
+    echo   %CRASH_LOG%
+    echo.
+    powershell -NoProfile -Command "Get-Content '%CRASH_LOG%' -Tail 20"
 )
+echo.
 pause
