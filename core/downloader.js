@@ -143,6 +143,37 @@ function toSafeFilename(text) {
     .substring(0, 60);
 }
 
+// Return sorted list of today's PDF files in outputDir (basenames only)
+function getFilesForToday(outputDir) {
+  const today = new Date().toISOString().slice(0, 10);
+  if (!fs.existsSync(outputDir)) return [];
+  return fs.readdirSync(outputDir)
+    .filter(f => f.startsWith('Dreieich_' + today) && f.endsWith('.pdf'))
+    .sort();
+}
+
+// Open the department list control, trying multiple approaches
+async function openDeptList(page, logger) {
+  // Already open?
+  const already = await page.locator('rebrush-department-list-control')
+    .getByText(/Dreieich/i).first().isVisible({ timeout: 800 }).catch(() => false);
+  if (already) return;
+
+  // Approach A: nth(2) from codegen recording
+  try {
+    await page.locator('rebrush-department-list-control div').nth(2).click({ timeout: 5000 });
+    await page.waitForTimeout(500);
+    const open = await page.locator('rebrush-department-list-control')
+      .getByText(/Dreieich/i).first().isVisible({ timeout: 2000 }).catch(() => false);
+    if (open) return;
+  } catch {}
+
+  // Approach B: first div as fallback
+  logger.warn('Sektionsliste-Toggle: nth(2) erfolglos – versuche first()');
+  await page.locator('rebrush-department-list-control div').first().click({ timeout: 5000 });
+  await page.waitForTimeout(600);
+}
+
 // ---------------------------------------------------------------------------
 // Main download function
 // ---------------------------------------------------------------------------
@@ -163,13 +194,14 @@ async function runDownload(config, logger, abortSignal) {
         : [];
       if (existing.length > 0) {
         logger.info('Bereits heute heruntergeladen: ' + existing.join(', ') + ' – ueberspringe.');
-        return { skipped: true, path: path.join(outputDir, existing[0]) };
+        return { skipped: true, files: existing };
       }
     }
   } catch {}
 
   fs.mkdirSync(outputDir, { recursive: true });
 
+  logger.info('[1/6] Browser ermitteln...');
   const executablePath = getChromiumPath();
   if (!executablePath) {
     throw new Error('Kein Browser gefunden. Bitte setup.bat erneut ausfuehren.');
@@ -193,13 +225,13 @@ async function runDownload(config, logger, abortSignal) {
     // ------------------------------------------------------------------
     // 1) PORTAL
     // ------------------------------------------------------------------
-    logger.info('Navigiere zu ' + PORTAL);
+    logger.info('[2/6] Portal laden');
     await page.goto(PORTAL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
 
     // ------------------------------------------------------------------
     // 2) LOGIN
     // ------------------------------------------------------------------
-    logger.info('Klicke Anmelden-Link');
+    logger.info('[3/6] Login durchführen');
     await page.getByRole('link', { name: /Anmelden/ }).first().click();
     await page.waitForLoadState('domcontentloaded', { timeout: 15_000 });
 
@@ -222,19 +254,18 @@ async function runDownload(config, logger, abortSignal) {
     // ------------------------------------------------------------------
     // 3) AKTUELLE AUSGABE
     // ------------------------------------------------------------------
-    logger.info('Waehle aktuelle Ausgabe');
+    logger.info('[4/6] Ausgabe wählen');
     await page.getByRole('link', { name: /Offenbach-Post/ }).first().click({ timeout: 20_000 });
     await page.waitForLoadState('networkidle', { timeout: 30_000 });
     // Warten bis die rebrush-Komponenten gerendert sind (Angular bootstrapping)
     await page.locator('rebrush-department-list-control').waitFor({ timeout: 20_000 });
+    logger.info('[5/6] Dreieich-Sektion finden');
 
     // ------------------------------------------------------------------
     // 4) DREIEICH-SEKTION FINDEN
     // Partial match: findet "Dreieich", "Dreieich + Neu-Isenburg", etc.
     // ------------------------------------------------------------------
-    logger.info('Oeffne Sektionsliste');
-    await page.locator('rebrush-department-list-control div').nth(2).click();
-    await page.waitForTimeout(400);
+    await openDeptList(page, logger);
 
     const dreieichItem = page.locator('rebrush-department-list-control').getByText(/Dreieich/i).first();
     const sectionLabel = (await dreieichItem.textContent({ timeout: 10_000 })).trim();
@@ -253,7 +284,7 @@ async function runDownload(config, logger, abortSignal) {
     // ------------------------------------------------------------------
     // 5) DOWNLOAD-OPTIONEN ERMITTELN
     // ------------------------------------------------------------------
-    logger.info('Oeffne Download-Dropdown');
+    logger.info('[6/6] Download-Optionen ermitteln');
     await page.locator('rebrush-download i').first().click();
     const options = await getDropdownOptions(page, logger);
 
@@ -280,7 +311,7 @@ async function runDownload(config, logger, abortSignal) {
         await page.waitForTimeout(300);
       }
 
-      logger.info('Lade herunter: "' + optText + '"');
+      logger.info('[6/6] Herunterladen: "' + optText + '" (' + (options.indexOf(optText)+1) + '/' + options.length + ')');
       const [dl] = await Promise.all([
         page.waitForEvent('download', { timeout: 60_000 }),
         page.locator('rebrush-download').getByText(optText).first().click(),
@@ -303,7 +334,7 @@ async function runDownload(config, logger, abortSignal) {
     const cfg = await loadConfig();
     await saveConfig({ ...cfg, lastSuccess: new Date().toISOString() });
 
-    return { skipped: false, path: downloadedFiles[0] };
+    return { skipped: false, files: downloadedFiles.map(f => path.basename(f)) };
 
   } catch (err) {
     try {
@@ -319,4 +350,4 @@ async function runDownload(config, logger, abortSignal) {
   }
 }
 
-module.exports = { runDownload };
+module.exports = { runDownload, getFilesForToday };

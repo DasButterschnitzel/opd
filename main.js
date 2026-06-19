@@ -12,7 +12,7 @@ process.on('uncaughtException', (err) => {
 });
 
 const { loadConfig, saveConfig } = require('./core/config');
-const { runDownload } = require('./core/downloader');
+const { runDownload, getFilesForToday } = require('./core/downloader');
 const { createLogger, getRecentLogs } = require('./core/logger');
 
 const isHeadless = process.argv.includes('--headless');
@@ -134,11 +134,26 @@ ipcMain.handle('download:start', async (event) => {
     activeDownloadAbort = new AbortController();
     await runDownload(config, logger, activeDownloadAbort.signal);
     activeDownloadAbort = null;
-    return { ok: true };
+    const cfg2 = await loadConfig();
+    const files = getFilesForToday(cfg2.outputDir);
+    return { ok: true, files };
   } catch (err) {
     activeDownloadAbort = null;
     return { ok: false, error: err.message };
   }
+});
+
+ipcMain.handle('files:today', async () => {
+  const cfg = await loadConfig();
+  const files = getFilesForToday(cfg.outputDir);
+  return { files };
+});
+
+ipcMain.handle('download:abort', () => {
+  if (activeDownloadAbort) {
+    activeDownloadAbort.abort();
+  }
+  return { ok: true };
 });
 
 ipcMain.handle('logs:get', async () => {

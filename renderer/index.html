@@ -26,6 +26,7 @@
 
     <!-- TAB: START -->
     <section class="tab-content active" id="tab-home">
+
       <div class="status-card">
         <div class="status-row">
           <span class="label">Letzter Erfolg:</span>
@@ -35,20 +36,27 @@
           <span class="label">Zielordner:</span>
           <span id="output-dir" class="value mono">–</span>
         </div>
+        <div id="today-row" class="status-row today-row hidden">
+          <span class="label">Heute geladen:</span>
+          <div id="today-files" class="today-files"></div>
+        </div>
       </div>
 
       <div class="actions">
         <button id="btn-download" class="btn btn-primary">
-          <span class="icon">⬇</span> Seite jetzt herunterladen
+          <span class="icon">⬇</span> Jetzt herunterladen
         </button>
         <button id="btn-open-folder" class="btn btn-secondary">
-          <span class="icon">📁</span> Zielordner öffnen
+          <span class="icon">📁</span> Ordner öffnen
         </button>
       </div>
 
       <div id="progress-wrap" class="progress-wrap hidden">
         <div class="spinner"></div>
-        <span id="progress-label">Download läuft…</span>
+        <div class="progress-info">
+          <span id="progress-step">Download läuft…</span>
+        </div>
+        <button id="btn-cancel" class="btn btn-cancel">✕ Abbrechen</button>
       </div>
 
       <div id="result-banner" class="result-banner hidden"></div>
@@ -57,6 +65,7 @@
         <div class="log-header">Live-Log</div>
         <div id="live-log" class="log-box"></div>
       </div>
+
     </section>
 
     <!-- TAB: EINSTELLUNGEN -->
@@ -71,7 +80,7 @@
           <div class="field">
             <label for="inp-pass">Passwort</label>
             <input id="inp-pass" type="password" name="password" autocomplete="current-password" />
-            <small>Wird verschlüsselt gespeichert (Windows DPAPI / safeStorage).</small>
+            <small>Wird verschlüsselt gespeichert (Windows DPAPI).</small>
           </div>
         </fieldset>
 
@@ -90,7 +99,7 @@
             <input id="inp-hour" type="number" name="scheduleHour" min="0" max="23" style="width:4rem" />
             <span>:</span>
             <input id="inp-min" type="number" name="scheduleMinute" min="0" max="59" style="width:4rem" />
-            <span class="hint">Uhr (Ausgabe ist ab ca. 04:00 online)</span>
+            <span class="hint">Uhr (Ausgabe ab ca. 04:00 online)</span>
           </div>
           <button type="button" id="btn-create-task" class="btn btn-secondary">
             Windows-Aufgabe einrichten
