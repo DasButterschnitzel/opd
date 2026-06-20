@@ -42,7 +42,7 @@ try {
     $lnk.TargetPath     = $ElectronExe
     $lnk.Arguments      = '.'
     $lnk.WorkingDirectory = $ProjectDir
-    $lnk.Description    = "$AppTitle – Dreieich"
+    $lnk.Description    = "$AppTitle - Dreieich"
     $lnk.IconLocation   = $IconArg
     $lnk.Save()
     Write-Ok "Desktop-Verknuepfung: $DesktopLink"
@@ -57,7 +57,7 @@ if ($Autostart) {
         $lnk.TargetPath      = $ElectronExe
         $lnk.Arguments       = '. --start-hidden'
         $lnk.WorkingDirectory = $ProjectDir
-        $lnk.Description     = "$AppTitle – Autostart"
+        $lnk.Description     = "$AppTitle - Autostart"
         $lnk.IconLocation    = $IconArg
         $lnk.WindowStyle     = 7  # minimiert
         $lnk.Save()
