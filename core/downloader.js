@@ -237,53 +237,88 @@ async function openDeptListSmart(page, logger) {
 }
 
 // ---------------------------------------------------------------------------
-// Find the Dreieich section with confidence scoring.
-// Logs all available sections and throws a helpful error when not found.
+// Score how strongly a section label represents "Dreieich".
+//  100 = exact match ("Dreieich")
+//   80 = Dreieich as a whole word among others (Kombiseite, e.g.
+//        "Dreieich + Neu-Isenburg", "Langen/Dreieich")
+//   40 = substring only, NOT a whole word (e.g. "Dreieichenhain") – uncertain
+//    0 = no match
+// Pure function (no DOM) so it can be unit-tested without a browser.
+// ---------------------------------------------------------------------------
+function scoreDreieich(text) {
+  const t = (text || '').trim();
+  const lower = t.toLowerCase();
+  if (lower === 'dreieich') return 100;
+  if (/\bdreieich\b/i.test(t)) return 80;
+  if (lower.includes('dreieich')) return 40;
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Find the Dreieich section autonomously.
+// Enumerates every section item ONCE, scores each, picks the best match,
+// and clicks that exact item. Recognises combined pages, ignores look-alikes
+// like "Dreieichenhain", and throws a helpful error (listing all sections)
+// when Dreieich is genuinely absent today (holiday / special edition).
 // ---------------------------------------------------------------------------
 async function findDreieichSection(page, logger) {
   const container = page.locator('rebrush-department-list-control');
 
-  // Enumerate visible texts for logging and error reporting
-  let sectionTexts = [];
-  try {
-    sectionTexts = await container.evaluate(el => {
-      const seen = new Set();
-      el.querySelectorAll('*').forEach(n => {
-        if (n.children.length === 0) {
-          const t = (n.textContent || '').trim();
-          if (t.length > 1 && t.length < 60) seen.add(t);
-        }
-      });
-      return [...seen];
-    });
-    if (sectionTexts.length) logger.info('Sektionen: ' + sectionTexts.join(' | '));
-  } catch {}
-
-  // Try matching with decreasing specificity (exact → prefix → contains)
-  const patterns = [
-    { re: /^Dreieich$/i, warn: false },
-    { re: /^Dreieich/i,  warn: true  },
-    { re: /Dreieich/i,   warn: true  },
-  ];
-  for (const { re, warn } of patterns) {
-    const loc = container.getByText(re).first();
-    const visible = await loc.isVisible({ timeout: 3000 }).catch(() => false);
-    if (visible) {
-      const text = ((await loc.textContent().catch(() => '')) || '').trim();
-      if (warn) logger.warn('Kombiseite erkannt: "' + text + '"');
-      else       logger.info('Sektion gefunden: "' + text + '"');
-      return loc;
+  // Find whichever selector actually yields the section items
+  const itemSelectors = ['[role="option"]', 'li', '[class*="item"]', '[class*="dept"]', 'a', 'button'];
+  let items = null;
+  for (const sel of itemSelectors) {
+    const loc = container.locator(sel);
+    const cnt = await loc.count().catch(() => 0);
+    if (cnt > 0) {
+      const texts = await loc.allTextContents().catch(() => []);
+      if (texts.filter(x => x.trim().length > 1).length >= 1) {
+        items = loc;
+        logger.info('Sektions-Items via "' + sel + '" (' + cnt + ' gefunden)');
+        break;
+      }
     }
   }
 
-  const sectionInfo = sectionTexts.length
-    ? sectionTexts.map(t => '"' + t + '"').join(', ')
-    : '(keine)';
-  throw new Error(
-    'Dreieich-Sektion heute nicht verfuegbar. ' +
-    'Verfuegbare Sektionen: ' + sectionInfo +
-    '. Moeglicherweise Feiertag oder Sonderedition.'
-  );
+  // Build a scored candidate list from the enumerated items
+  const scored = [];
+  if (items) {
+    const cnt = await items.count();
+    for (let i = 0; i < cnt; i++) {
+      const text = ((await items.nth(i).textContent().catch(() => '')) || '').trim();
+      if (text) scored.push({ i, text, score: scoreDreieich(text) });
+    }
+  }
+
+  if (scored.length) {
+    logger.info('Verfuegbare Sektionen: ' + scored.map(s => s.text).join(' | '));
+  }
+
+  const matches = scored.filter(s => s.score > 0).sort((a, b) => b.score - a.score);
+
+  if (matches.length === 0) {
+    // Last resort: direct word-boundary text search in case the item
+    // selectors missed the right element entirely.
+    const direct = container.getByText(/\bDreieich\b/i).first();
+    if (await direct.isVisible({ timeout: 2000 }).catch(() => false)) {
+      const text = ((await direct.textContent().catch(() => '')) || '').trim();
+      logger.warn('Sektion via Direktsuche gefunden: "' + text + '"');
+      return direct;
+    }
+    const list = scored.length ? scored.map(s => '"' + s.text + '"').join(', ') : '(keine)';
+    throw new Error(
+      'Dreieich-Sektion heute nicht verfuegbar. ' +
+      'Verfuegbare Sektionen: ' + list +
+      '. Moeglicherweise Feiertag oder Sonderedition.'
+    );
+  }
+
+  const best = matches[0];
+  if (best.score === 100)     logger.info('Sektion gefunden: "' + best.text + '"');
+  else if (best.score === 80) logger.warn('Kombiseite erkannt: "' + best.text + '" (Dreieich + weitere Orte)');
+  else                        logger.warn('Unsichere Zuordnung: "' + best.text + '" – bitte Protokoll pruefen.');
+
+  return items.nth(best.i);
 }
 
 // ---------------------------------------------------------------------------
@@ -530,4 +565,4 @@ async function runDownload(config, logger, abortSignal) {
   }
 }
 
-module.exports = { runDownload, getFilesForToday, testLogin };
+module.exports = { runDownload, getFilesForToday, testLogin, scoreDreieich };
