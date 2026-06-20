@@ -22,6 +22,19 @@ contextBridge.exposeInMainWorld('api', {
   openFolder:   () => ipcRenderer.invoke('folder:open'),
   selectFolder: () => ipcRenderer.invoke('folder:select'),
 
+  // Dateien öffnen
+  openFile: (absolutePath) => ipcRenderer.invoke('file:open', absolutePath),
+
+  // Login testen
+  testLogin: () => ipcRenderer.invoke('login:test'),
+
+  // Tray-Aktionen (download / settings / log)
+  onTrayAction: (cb) => {
+    const handler = (_e, action) => cb(action);
+    ipcRenderer.on('tray:action', handler);
+    return () => ipcRenderer.removeListener('tray:action', handler);
+  },
+
   // Aufgabenplaner
   createSchedulerTask: () => ipcRenderer.invoke('scheduler:create'),
 });

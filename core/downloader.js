@@ -4,6 +4,28 @@ const path = require('path');
 const { app } = require('electron');
 const { saveConfig, loadConfig } = require('./config');
 
+// ---------------------------------------------------------------------------
+// Generic retry helper for network/timing-sensitive operations
+// ---------------------------------------------------------------------------
+async function withRetry(fn, { retries = 2, baseDelayMs = 2000, label = '', logger, abortSignal } = {}) {
+  let lastErr;
+  for (let attempt = 1; attempt <= retries + 1; attempt++) {
+    if (abortSignal?.aborted) throw new Error('Abgebrochen.');
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (abortSignal?.aborted) throw err;
+      if (attempt <= retries) {
+        const delay = baseDelayMs * attempt;
+        if (logger) logger.warn((label ? label + ': ' : '') + 'Versuch ' + attempt + ' fehlgeschlagen (' + err.message + ') – warte ' + delay + 'ms');
+        await new Promise(r => setTimeout(r, delay));
+      }
+    }
+  }
+  throw lastErr;
+}
+
 function getChromiumPath() {
   if (app.isPackaged) {
     const bundled = path.join(process.resourcesPath, 'chromium-browser');
@@ -52,6 +74,25 @@ function getChromiumPath() {
 }
 
 const PORTAL = 'https://epaper.op-online.de';
+
+// ---------------------------------------------------------------------------
+// Verify a saved file is a valid PDF (size > 1KB, starts with %PDF).
+// Deletes the file and throws if invalid so retry can re-download.
+// ---------------------------------------------------------------------------
+function verifyPdfIntegrity(filePath) {
+  const stat = fs.statSync(filePath);
+  if (stat.size < 1024) {
+    fs.unlinkSync(filePath);
+    throw new Error('PDF zu klein (' + stat.size + ' Bytes): ' + path.basename(filePath));
+  }
+  const buf = Buffer.alloc(4);
+  const fd = fs.openSync(filePath, 'r');
+  try { fs.readSync(fd, buf, 0, 4, 0); } finally { fs.closeSync(fd); }
+  if (buf.toString('ascii') !== '%PDF') {
+    fs.unlinkSync(filePath);
+    throw new Error('Keine gueltige PDF: ' + path.basename(filePath));
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Enumerate download options from the open dropdown.
@@ -152,26 +193,145 @@ function getFilesForToday(outputDir) {
     .sort();
 }
 
-// Open the department list control, trying multiple approaches
-async function openDeptList(page, logger) {
-  // Already open?
-  const already = await page.locator('rebrush-department-list-control')
-    .getByText(/Dreieich/i).first().isVisible({ timeout: 800 }).catch(() => false);
-  if (already) return;
+// ---------------------------------------------------------------------------
+// Check if the Dreieich entry is visible in the department list
+// ---------------------------------------------------------------------------
+async function isDreieichVisible(page) {
+  return page.locator('rebrush-department-list-control')
+    .getByText(/Dreieich/i).first()
+    .isVisible({ timeout: 800 }).catch(() => false);
+}
 
-  // Approach A: nth(2) from codegen recording
+// ---------------------------------------------------------------------------
+// Open the department list with 3-pass fallback and success verification
+// ---------------------------------------------------------------------------
+async function openDeptListSmart(page, logger) {
+  if (await isDreieichVisible(page)) return;
+
+  // Pass 1: semantic aria/button toggle
   try {
-    await page.locator('rebrush-department-list-control div').nth(2).click({ timeout: 5000 });
-    await page.waitForTimeout(500);
-    const open = await page.locator('rebrush-department-list-control')
-      .getByText(/Dreieich/i).first().isVisible({ timeout: 2000 }).catch(() => false);
-    if (open) return;
+    const toggle = page.locator(
+      'rebrush-department-list-control [aria-expanded], ' +
+      'rebrush-department-list-control [role="button"], ' +
+      'rebrush-department-list-control button'
+    ).first();
+    const cnt = await toggle.count({ timeout: 1000 }).catch(() => 0);
+    if (cnt > 0) {
+      await toggle.click({ timeout: 3000 });
+      await page.waitForTimeout(600);
+      if (await isDreieichVisible(page)) return;
+    }
   } catch {}
 
-  // Approach B: first div as fallback
-  logger.warn('Sektionsliste-Toggle: nth(2) erfolglos – versuche first()');
-  await page.locator('rebrush-department-list-control div').first().click({ timeout: 5000 });
+  // Pass 2: nth(2) from codegen recording
+  try {
+    await page.locator('rebrush-department-list-control div').nth(2).click({ timeout: 3000 });
+    await page.waitForTimeout(600);
+    if (await isDreieichVisible(page)) return;
+  } catch {}
+
+  // Pass 3: first div as last resort
+  logger.warn('Dept-Toggle: alle Strategien erschoepft, versuche first()');
+  await page.locator('rebrush-department-list-control div').first().click({ timeout: 3000 });
   await page.waitForTimeout(600);
+}
+
+// ---------------------------------------------------------------------------
+// Find the Dreieich section with confidence scoring.
+// Logs all available sections and throws a helpful error when not found.
+// ---------------------------------------------------------------------------
+async function findDreieichSection(page, logger) {
+  const container = page.locator('rebrush-department-list-control');
+
+  // Enumerate visible texts for logging and error reporting
+  let sectionTexts = [];
+  try {
+    sectionTexts = await container.evaluate(el => {
+      const seen = new Set();
+      el.querySelectorAll('*').forEach(n => {
+        if (n.children.length === 0) {
+          const t = (n.textContent || '').trim();
+          if (t.length > 1 && t.length < 60) seen.add(t);
+        }
+      });
+      return [...seen];
+    });
+    if (sectionTexts.length) logger.info('Sektionen: ' + sectionTexts.join(' | '));
+  } catch {}
+
+  // Try matching with decreasing specificity (exact → prefix → contains)
+  const patterns = [
+    { re: /^Dreieich$/i, warn: false },
+    { re: /^Dreieich/i,  warn: true  },
+    { re: /Dreieich/i,   warn: true  },
+  ];
+  for (const { re, warn } of patterns) {
+    const loc = container.getByText(re).first();
+    const visible = await loc.isVisible({ timeout: 3000 }).catch(() => false);
+    if (visible) {
+      const text = ((await loc.textContent().catch(() => '')) || '').trim();
+      if (warn) logger.warn('Kombiseite erkannt: "' + text + '"');
+      else       logger.info('Sektion gefunden: "' + text + '"');
+      return loc;
+    }
+  }
+
+  const sectionInfo = sectionTexts.length
+    ? sectionTexts.map(t => '"' + t + '"').join(', ')
+    : '(keine)';
+  throw new Error(
+    'Dreieich-Sektion heute nicht verfuegbar. ' +
+    'Verfuegbare Sektionen: ' + sectionInfo +
+    '. Moeglicherweise Feiertag oder Sonderedition.'
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Test login only (no download) – used by the GUI "Zugangsdaten testen" button
+// ---------------------------------------------------------------------------
+async function testLogin(config, logger) {
+  const executablePath = getChromiumPath();
+  if (!executablePath) {
+    throw new Error(
+      'Kein Browser gefunden.\n' +
+      'Loesung: setup.bat erneut ausfuehren oder Chrome/Edge installieren.'
+    );
+  }
+
+  const browser = await chromium.launch({ headless: true, executablePath });
+  const context = await browser.newContext();
+  const page = await context.newPage();
+
+  try {
+    await page.goto(PORTAL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await page.getByRole('link', { name: /Anmelden/ }).first().click();
+    await page.waitForLoadState('domcontentloaded', { timeout: 15_000 });
+    await page.getByPlaceholder('E-Mail').fill(config.username);
+    await page.getByPlaceholder('Passwort').fill(config.password);
+    await page.getByRole('button', { name: 'Anmelden' }).click();
+    await page.waitForLoadState('networkidle', { timeout: 30_000 });
+
+    await page.getByRole('link', { name: /mit Anmeldung fortfahren/i })
+      .click({ timeout: 5_000 }).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {});
+
+    const errorLoc = page.locator('[role="alert"], [class*="error"], [class*="alert"]')
+      .or(page.getByText(/ungueltig|falsch|incorrect|invalid|fehlgeschlagen/i));
+    const hasError = await errorLoc.first().isVisible({ timeout: 3_000 }).catch(() => false);
+    if (hasError) {
+      const errText = ((await errorLoc.first().textContent().catch(() => '')) || '').trim();
+      throw new Error('Login fehlgeschlagen: ' + (errText || 'Zugangsdaten pruefen'));
+    }
+
+    const currentUrl = page.url();
+    if (currentUrl.includes('/login') || currentUrl.includes('/anmelden')) {
+      throw new Error('Login-Seite noch aktiv – Zugangsdaten vermutlich falsch.');
+    }
+
+    return { ok: true };
+  } finally {
+    await browser.close().catch(() => {});
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -182,9 +342,8 @@ async function runDownload(config, logger, abortSignal) {
   const today = new Date().toISOString().slice(0, 10);
 
   // ------------------------------------------------------------------
-  // IDEMPOTENZ: Wenn heute bereits erfolgreich geladen wurde UND
-  // mindestens eine Dreieich-Datei fuer heute existiert -> ueberspringen.
-  // So wird der Login komplett vermieden.
+  // IDEMPOTENZ: Skip if today's files all exist and pass integrity check.
+  // Partial or corrupt downloads fall through for re-download.
   // ------------------------------------------------------------------
   try {
     const cfg = await loadConfig();
@@ -193,8 +352,14 @@ async function runDownload(config, logger, abortSignal) {
         ? fs.readdirSync(outputDir).filter(f => f.startsWith(`Dreieich_${today}`) && f.endsWith('.pdf'))
         : [];
       if (existing.length > 0) {
-        logger.info('Bereits heute heruntergeladen: ' + existing.join(', ') + ' – ueberspringe.');
-        return { skipped: true, files: existing };
+        const allValid = existing.every(f => {
+          try { verifyPdfIntegrity(path.join(outputDir, f)); return true; } catch { return false; }
+        });
+        if (allValid) {
+          logger.info('Bereits heute heruntergeladen (alle Dateien gueltig): ' + existing.join(', '));
+          return { skipped: true, files: existing };
+        }
+        logger.warn('Unvollstaendiger oder korrupter vorheriger Download – lade erneut herunter.');
       }
     }
   } catch {}
@@ -204,7 +369,12 @@ async function runDownload(config, logger, abortSignal) {
   logger.info('[1/6] Browser ermitteln...');
   const executablePath = getChromiumPath();
   if (!executablePath) {
-    throw new Error('Kein Browser gefunden. Bitte setup.bat erneut ausfuehren.');
+    throw new Error(
+      'Kein Browser gefunden.\n' +
+      'Loesung A: setup.bat erneut ausfuehren.\n' +
+      'Loesung B: Google Chrome oder Microsoft Edge installieren.\n' +
+      'Loesung C: browser-path.txt anlegen mit dem Pfad zur chrome.exe.'
+    );
   }
   logger.info('Starte Browser: ' + executablePath);
 
@@ -226,7 +396,10 @@ async function runDownload(config, logger, abortSignal) {
     // 1) PORTAL
     // ------------------------------------------------------------------
     logger.info('[2/6] Portal laden');
-    await page.goto(PORTAL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await withRetry(
+      () => page.goto(PORTAL, { waitUntil: 'domcontentloaded', timeout: 30_000 }),
+      { retries: 2, baseDelayMs: 2000, label: 'Portal laden', logger, abortSignal }
+    );
 
     // ------------------------------------------------------------------
     // 2) LOGIN
@@ -239,16 +412,23 @@ async function runDownload(config, logger, abortSignal) {
     await page.getByPlaceholder('E-Mail').fill(username);
     await page.getByPlaceholder('Passwort').fill(password);
     await page.getByRole('button', { name: 'Anmelden' }).click();
-    await page.waitForLoadState('networkidle', { timeout: 30_000 });
+    await withRetry(
+      () => page.waitForLoadState('networkidle', { timeout: 30_000 }),
+      { retries: 2, baseDelayMs: 2000, label: 'Login-Laden', logger, abortSignal }
+    );
 
     // Optionaler "mit Anmeldung fortfahren" Dialog
     await page.getByRole('link', { name: /mit Anmeldung fortfahren/i })
       .click({ timeout: 5_000 }).catch(() => {});
     await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
 
-    const loginError = await page.getByText(/ungueltig|falsch|incorrect|invalid|fehlgeschlagen/i)
-      .isVisible({ timeout: 3_000 }).catch(() => false);
-    if (loginError) throw new Error('Login fehlgeschlagen – Zugangsdaten pruefen.');
+    const errorLoc = page.locator('[role="alert"], [class*="error"], [class*="alert"]')
+      .or(page.getByText(/ungueltig|falsch|incorrect|invalid|fehlgeschlagen/i));
+    const hasLoginError = await errorLoc.first().isVisible({ timeout: 3_000 }).catch(() => false);
+    if (hasLoginError) {
+      const errText = ((await errorLoc.first().textContent().catch(() => '')) || '').trim();
+      throw new Error('Login fehlgeschlagen: ' + (errText || 'Zugangsdaten pruefen.'));
+    }
     logger.info('Login erfolgreich');
 
     // ------------------------------------------------------------------
@@ -257,28 +437,20 @@ async function runDownload(config, logger, abortSignal) {
     logger.info('[4/6] Ausgabe wählen');
     await page.getByRole('link', { name: /Offenbach-Post/ }).first().click({ timeout: 20_000 });
     await page.waitForLoadState('networkidle', { timeout: 30_000 });
-    // Warten bis die rebrush-Komponenten gerendert sind (Angular bootstrapping)
     await page.locator('rebrush-department-list-control').waitFor({ timeout: 20_000 });
-    logger.info('[5/6] Dreieich-Sektion finden');
 
     // ------------------------------------------------------------------
     // 4) DREIEICH-SEKTION FINDEN
-    // Partial match: findet "Dreieich", "Dreieich + Neu-Isenburg", etc.
     // ------------------------------------------------------------------
-    await openDeptList(page, logger);
+    logger.info('[5/6] Dreieich-Sektion finden');
+    await withRetry(
+      () => openDeptListSmart(page, logger),
+      { retries: 1, baseDelayMs: 2000, label: 'Sektionsliste oeffnen', logger, abortSignal }
+    );
 
-    const dreieichItem = page.locator('rebrush-department-list-control').getByText(/Dreieich/i).first();
-    const sectionLabel = (await dreieichItem.textContent({ timeout: 10_000 })).trim();
-    logger.info('Sektion gefunden: "' + sectionLabel + '"');
-
-    // Hinweis wenn Kombiseite
-    if (sectionLabel.toLowerCase() !== 'dreieich') {
-      logger.info('Hinweis: Kombiseite – Dreieich erscheint zusammen mit anderen Orten.');
-    }
-
+    const dreieichItem = await findDreieichSection(page, logger);
     await dreieichItem.click();
     await page.waitForLoadState('networkidle', { timeout: 20_000 });
-    // Warten bis das rebrush-download-Element sichtbar ist
     await page.locator('rebrush-download').first().waitFor({ timeout: 15_000 });
 
     // ------------------------------------------------------------------
@@ -297,32 +469,40 @@ async function runDownload(config, logger, abortSignal) {
       const outFile    = path.join(outputDir, `Dreieich_${today}_${safeSuffix}.pdf`);
 
       if (fs.existsSync(outFile)) {
-        logger.info('Bereits vorhanden: ' + outFile);
-        downloadedFiles.push(outFile);
-        continue;
+        try {
+          verifyPdfIntegrity(outFile);
+          logger.info('Bereits vorhanden (gueltig): ' + path.basename(outFile));
+          downloadedFiles.push(outFile);
+          continue;
+        } catch (intErr) {
+          // verifyPdfIntegrity already deleted the corrupt file
+          logger.warn('Vorhandene Datei korrupt (' + intErr.message + ') – lade neu.');
+        }
       }
 
-      // Sicherstellen, dass das Dropdown offen ist (koennte nach einem Download geschlossen sein)
-      const menuVisible = await page.locator('rebrush-download li, rebrush-download button, rebrush-download a')
-        .first().isVisible({ timeout: 800 }).catch(() => false);
-      if (!menuVisible) {
-        logger.info('Dropdown geschlossen – oeffne neu');
-        await page.locator('rebrush-download i').first().click();
-        await page.waitForTimeout(300);
-      }
+      await withRetry(async () => {
+        // Ensure dropdown is open before each download attempt
+        const menuVisible = await page.locator('rebrush-download li, rebrush-download button, rebrush-download a')
+          .first().isVisible({ timeout: 800 }).catch(() => false);
+        if (!menuVisible) {
+          logger.info('Dropdown geschlossen – oeffne neu');
+          await page.locator('rebrush-download i').first().click();
+          await page.waitForTimeout(300);
+        }
 
-      logger.info('[6/6] Herunterladen: "' + optText + '" (' + (options.indexOf(optText)+1) + '/' + options.length + ')');
-      const [dl] = await Promise.all([
-        page.waitForEvent('download', { timeout: 60_000 }),
-        page.locator('rebrush-download').getByText(optText).first().click(),
-      ]);
-
-      await dl.saveAs(outFile);
-      const failure = await dl.failure();
-      if (failure) throw new Error('Download "' + optText + '" fehlgeschlagen: ' + failure);
+        logger.info('[6/6] Herunterladen: "' + optText + '" (' + (options.indexOf(optText) + 1) + '/' + options.length + ')');
+        const [dl] = await Promise.all([
+          page.waitForEvent('download', { timeout: 60_000 }),
+          page.locator('rebrush-download').getByText(optText).first().click(),
+        ]);
+        await dl.saveAs(outFile);
+        const failure = await dl.failure();
+        if (failure) throw new Error('Download "' + optText + '" fehlgeschlagen: ' + failure);
+        verifyPdfIntegrity(outFile);
+      }, { retries: 2, baseDelayMs: 2000, label: 'Download "' + optText + '"', logger, abortSignal });
 
       downloadedFiles.push(outFile);
-      logger.info('Gespeichert: ' + outFile);
+      logger.info('Gespeichert: ' + path.basename(outFile));
     }
 
     if (downloadedFiles.length === 0) {
@@ -350,4 +530,4 @@ async function runDownload(config, logger, abortSignal) {
   }
 }
 
-module.exports = { runDownload, getFilesForToday };
+module.exports = { runDownload, getFilesForToday, testLogin };

@@ -24,8 +24,10 @@ function makeLogDiv(line) {
 }
 
 // --------------------------------------------------------------------------
-// Tab-Navigation
+// Tab-Navigation with log auto-refresh
 // --------------------------------------------------------------------------
+let logRefreshInterval = null;
+
 document.querySelectorAll('.tab-btn').forEach((btn) => {
   btn.addEventListener('click', () => {
     const target = btn.dataset.tab;
@@ -33,15 +35,23 @@ document.querySelectorAll('.tab-btn').forEach((btn) => {
     document.querySelectorAll('.tab-content').forEach((s) => s.classList.remove('active'));
     btn.classList.add('active');
     document.getElementById('tab-' + target).classList.add('active');
-    if (target === 'log') loadFullLog();
+
+    if (logRefreshInterval) { clearInterval(logRefreshInterval); logRefreshInterval = null; }
+    if (target === 'log') {
+      loadFullLog();
+      logRefreshInterval = setInterval(loadFullLog, 5000);
+    }
   });
 });
 
 // --------------------------------------------------------------------------
 // Status-Karte + Heute-Dateien
 // --------------------------------------------------------------------------
+let currentOutputDir = '';
+
 async function refreshStatus() {
   const cfg = await window.api.getConfig();
+  currentOutputDir = cfg.outputDir || '';
 
   document.getElementById('last-success').textContent = cfg.lastSuccess
     ? new Date(cfg.lastSuccess).toLocaleString('de-DE')
@@ -59,10 +69,15 @@ async function refreshTodayFiles() {
   if (files && files.length) {
     row.classList.remove('hidden');
     files.forEach(name => {
-      const span = document.createElement('span');
-      span.className = 'today-file';
-      span.textContent = name;
-      list.appendChild(span);
+      const btn = document.createElement('button');
+      btn.className = 'today-file-link';
+      btn.textContent = name;
+      btn.title = 'Klicken zum Öffnen';
+      btn.addEventListener('click', () => {
+        const sep = currentOutputDir.includes('\\') ? '\\' : '/';
+        window.api.openFile(currentOutputDir + sep + name);
+      });
+      list.appendChild(btn);
     });
   } else {
     row.classList.add('hidden');
@@ -186,14 +201,38 @@ document.getElementById('btn-open-folder').addEventListener('click', () => {
 async function loadFullLog() {
   const lines = await window.api.getLogs();
   const el = document.getElementById('full-log');
+  const wasAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 20;
   el.innerHTML = '';
-  for (const line of lines) {
-    el.appendChild(makeLogDiv(line));
-  }
-  el.scrollTop = el.scrollHeight;
+  for (const line of lines) el.appendChild(makeLogDiv(line));
+  if (wasAtBottom) el.scrollTop = el.scrollHeight;
 }
 
 document.getElementById('btn-refresh-log').addEventListener('click', loadFullLog);
+
+// --------------------------------------------------------------------------
+// Zugangsdaten testen
+// --------------------------------------------------------------------------
+document.getElementById('btn-test-login').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-test-login');
+  const msg = document.getElementById('test-login-msg');
+
+  // Save current credentials first so testLogin uses the latest input
+  await window.api.saveConfig({
+    username: document.getElementById('inp-user').value.trim(),
+    password: document.getElementById('inp-pass').value,
+  });
+
+  btn.disabled = true;
+  msg.classList.remove('hidden', 'err');
+  msg.textContent = 'Teste Verbindung…';
+
+  const result = await window.api.testLogin();
+  btn.disabled = false;
+  msg.classList.remove('hidden', 'err');
+  msg.textContent = result.ok ? '✓ Login erfolgreich!' : '✗ ' + (result.error || 'Fehler');
+  if (!result.ok) msg.classList.add('err');
+  setTimeout(() => msg.classList.add('hidden'), 6000);
+});
 
 // --------------------------------------------------------------------------
 // Init
@@ -201,4 +240,11 @@ document.getElementById('btn-refresh-log').addEventListener('click', loadFullLog
 (async () => {
   await refreshStatus();
   await loadSettings();
+
+  // Handle tray menu actions
+  window.api.onTrayAction((action) => {
+    if (action === 'download') document.getElementById('btn-download').click();
+    if (action === 'settings') document.querySelector('[data-tab="settings"]').click();
+    if (action === 'log')      document.querySelector('[data-tab="log"]').click();
+  });
 })();

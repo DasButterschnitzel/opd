@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage, Notification, Tray, Menu, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -12,10 +12,22 @@ process.on('uncaughtException', (err) => {
 });
 
 const { loadConfig, saveConfig } = require('./core/config');
-const { runDownload, getFilesForToday } = require('./core/downloader');
+const { runDownload, getFilesForToday, testLogin } = require('./core/downloader');
 const { createLogger, getRecentLogs } = require('./core/logger');
 
 const isHeadless = process.argv.includes('--headless');
+
+// ---------------------------------------------------------------------------
+// Toast notifications (works in both GUI and headless mode)
+// ---------------------------------------------------------------------------
+function showToast({ title, body, openFolder }) {
+  try {
+    if (!Notification.isSupported()) return;
+    const n = new Notification({ title, body });
+    if (openFolder) n.on('click', () => shell.openPath(openFolder));
+    n.show();
+  } catch {}
+}
 
 // --- HEADLESS MODE -----------------------------------------------------------
 
@@ -40,11 +52,22 @@ if (isHeadless) {
     }
 
     try {
-      await runDownload(config, logger);
-      logger.info('Download abgeschlossen. Beende.');
+      const result = await runDownload(config, logger);
+      const summary = result.skipped
+        ? 'Bereits heute geladen.'
+        : result.files.length + ' Datei(en): ' + result.files.join(', ');
+      logger.info('Download abgeschlossen: ' + summary);
+      showToast({
+        title: 'OP ePaper – Dreieich',
+        body: result.skipped ? 'Bereits heute geladen.' : '✓ ' + summary,
+        openFolder: config.outputDir,
+      });
+      await new Promise(r => setTimeout(r, 2000));
       app.exit(0);
     } catch (err) {
       logger.error('Download fehlgeschlagen: ' + err.message);
+      showToast({ title: 'OP ePaper – Fehler', body: err.message });
+      await new Promise(r => setTimeout(r, 2000));
       app.exit(1);
     }
   });
@@ -57,6 +80,8 @@ if (isHeadless) {
 // --- GUI MODE ----------------------------------------------------------------
 
 let mainWindow;
+let tray = null;
+app.isQuitting = false;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -74,9 +99,65 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   mainWindow.setMenu(null);
+
+  // Minimize to tray instead of closing
+  mainWindow.on('close', (e) => {
+    if (tray && !app.isQuitting) {
+      e.preventDefault();
+      mainWindow.hide();
+    }
+  });
 }
 
-app.whenReady().then(createWindow);
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow();
+  } else {
+    mainWindow.show();
+    mainWindow.focus();
+  }
+}
+
+function createTray() {
+  const iconPath = path.join(__dirname, 'assets', 'tray-icon.png');
+  const icon = fs.existsSync(iconPath)
+    ? nativeImage.createFromPath(iconPath)
+    : nativeImage.createEmpty();
+
+  tray = new Tray(icon);
+  tray.setToolTip('OP ePaper Tool – Dreieich');
+
+  const sendAction = (action) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('tray:action', action);
+    }
+  };
+
+  const menu = Menu.buildFromTemplate([
+    { label: 'Jetzt herunterladen', click: () => { showMainWindow(); sendAction('download'); } },
+    { label: 'Einstellungen',       click: () => { showMainWindow(); sendAction('settings'); } },
+    { label: 'Protokoll anzeigen',  click: () => { showMainWindow(); sendAction('log'); } },
+    { type: 'separator' },
+    { label: 'Beenden', click: () => { app.isQuitting = true; app.quit(); } },
+  ]);
+
+  tray.setContextMenu(menu);
+  tray.on('double-click', showMainWindow);
+
+  loadConfig().then(cfg => {
+    if (cfg.lastSuccess && tray) {
+      const last = new Date(cfg.lastSuccess).toLocaleDateString('de-DE');
+      tray.setToolTip('OP ePaper Tool – Dreieich\nLetzter Erfolg: ' + last);
+    }
+  }).catch(() => {});
+}
+
+app.whenReady().then(() => {
+  createWindow();
+  createTray();
+});
+
+app.on('before-quit', () => { app.isQuitting = true; });
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
@@ -136,6 +217,10 @@ ipcMain.handle('download:start', async (event) => {
     activeDownloadAbort = null;
     const cfg2 = await loadConfig();
     const files = getFilesForToday(cfg2.outputDir);
+    if (tray) {
+      const last = new Date().toLocaleDateString('de-DE');
+      tray.setToolTip('OP ePaper Tool – Dreieich\nLetzter Erfolg: ' + last);
+    }
     return { ok: true, files };
   } catch (err) {
     activeDownloadAbort = null;
@@ -174,6 +259,29 @@ ipcMain.handle('folder:select', async () => {
     return result.filePaths[0];
   }
   return null;
+});
+
+ipcMain.handle('file:open', async (_e, absolutePath) => {
+  if (!absolutePath || typeof absolutePath !== 'string') return { ok: false };
+  const cfg = await loadConfig();
+  // Security: only allow opening files within the configured output directory
+  if (!absolutePath.startsWith(cfg.outputDir)) return { ok: false, error: 'Pfad nicht erlaubt.' };
+  const errMsg = await shell.openPath(absolutePath);
+  return { ok: !errMsg, error: errMsg || undefined };
+});
+
+ipcMain.handle('login:test', async () => {
+  const logger = createLogger();
+  try {
+    const cfg = await loadConfig();
+    if (!cfg.username || !cfg.password) {
+      return { ok: false, error: 'Zugangsdaten fehlen.' };
+    }
+    await testLogin(cfg, logger);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
 });
 
 ipcMain.handle('scheduler:create', async () => {

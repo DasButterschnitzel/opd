@@ -104,6 +104,24 @@ body {
   width: fit-content;
 }
 
+/* Clickable today-file badges */
+.today-file-link {
+  font-size: 12px;
+  font-family: monospace;
+  color: var(--success);
+  background: #d4edda;
+  border-radius: 4px;
+  padding: 2px 7px;
+  display: inline-block;
+  width: fit-content;
+  border: none;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: var(--success);
+  text-underline-offset: 2px;
+}
+.today-file-link:hover { background: #b8dfc7; }
+
 /* ACTIONS */
 .actions { display: flex; gap: 10px; flex-wrap: wrap; }
 
