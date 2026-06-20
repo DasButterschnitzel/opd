@@ -570,6 +570,62 @@ async function runDownload(config, logger, abortSignal, options = {}) {
     await page.getByRole('link', { name: /Offenbach-Post/ }).first().click({ timeout: 20_000 });
     await page.waitForLoadState('networkidle', { timeout: 30_000 });
 
+    // After clicking the nav link we may land on the kiosk overview (large
+    // edition thumbnail + "Erscheinungstag wählen" / "Ausgabe wählen" dropdowns)
+    // rather than directly in the reader.  Click the edition thumbnail to enter
+    // the reader when rebrush-department-list-control is not yet visible.
+    const deptCtrl = page.locator('rebrush-department-list-control');
+    const alreadyInReader = await deptCtrl.count({ timeout: 2000 }).catch(() => 0) > 0;
+    if (!alreadyInReader) {
+      logger.info('Kiosk-Übersicht erkannt – öffne aktuelle Ausgabe...');
+      const kiosk_strategies = [
+        'rebrush-kiosk-item a',
+        'rebrush-kiosk-item img',
+        'rebrush-kiosk-item',
+        '[class*="kiosk-item"] a',
+        '[class*="kiosk-item"] img',
+        '[class*="edition-item"] a',
+        '[class*="edition-item"] img',
+        '[class*="publication-item"] a',
+        '[class*="cover"] a',
+        '[class*="cover"] img',
+        'article a img',
+        'main a img',
+      ];
+      let opened = false;
+      for (const sel of kiosk_strategies) {
+        try {
+          const loc = page.locator(sel).first();
+          if (await loc.count({ timeout: 800 }).catch(() => 0) > 0) {
+            await loc.click({ timeout: 5000 });
+            await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+            if (await deptCtrl.count({ timeout: 3000 }).catch(() => 0) > 0) {
+              logger.info('Ausgabe geöffnet via "' + sel + '"');
+              opened = true;
+              break;
+            }
+          }
+        } catch {}
+      }
+      if (!opened) {
+        // Final attempt: click the first large image on the page (edition cover)
+        try {
+          await page.locator('img').first().click({ timeout: 5000 });
+          await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+          if (await deptCtrl.count({ timeout: 3000 }).catch(() => 0) > 0) {
+            logger.info('Ausgabe geöffnet via erstes Bild auf der Seite');
+            opened = true;
+          }
+        } catch {}
+      }
+      if (!opened) {
+        throw new Error(
+          'Kiosk: Ausgabe konnte nicht geöffnet werden – kein Weg in den Reader gefunden. ' +
+          'Bitte Debug-Screenshot prüfen.'
+        );
+      }
+    }
+
     // Rückwirkender Lauf: zur Archiv-Ausgabe des Zieldatums navigieren
     if (!isToday) {
       await navigateToArchiveDate(page, today, logger);
