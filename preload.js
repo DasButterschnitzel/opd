@@ -7,7 +7,13 @@ contextBridge.exposeInMainWorld('api', {
 
   // Download
   startDownload: () => ipcRenderer.invoke('download:start'),
+  catchUpDownload: (targetDate) => ipcRenderer.invoke('download:start', { targetDate }),
   cancelDownload: () => ipcRenderer.invoke('download:abort'),
+
+  // Diagnose / Status / verpasste Tage
+  runDiagnostics: () => ipcRenderer.invoke('diagnostics:run'),
+  getMissedDates: () => ipcRenderer.invoke('missed:get'),
+  getStatus: () => ipcRenderer.invoke('status:get'),
   onDownloadLog: (cb) => {
     const handler = (_e, line) => cb(line);
     ipcRenderer.on('download:log', handler);

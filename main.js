@@ -11,9 +11,24 @@ process.on('uncaughtException', (err) => {
   console.error(msg);
 });
 
-const { loadConfig, saveConfig } = require('./core/config');
-const { runDownload, getFilesForToday, testLogin } = require('./core/downloader');
+const { loadConfig, saveConfig, recordRunResult } = require('./core/config');
+const { runDownload, getFilesForToday, testLogin, findMissedDates, getChromiumPath } = require('./core/downloader');
+const { runSelfCheck } = require('./core/selfcheck');
 const { createLogger, getRecentLogs } = require('./core/logger');
+
+// Gesamt-Timeout (Watchdog): bricht einen hängenden Download nach 5 Min ab.
+const DOWNLOAD_WATCHDOG_MS = 5 * 60 * 1000;
+
+function withWatchdog(promise, abortController, ms = DOWNLOAD_WATCHDOG_MS) {
+  let timer;
+  const watchdog = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => {
+      try { abortController?.abort(); } catch {}
+      reject(new Error('Zeitüberschreitung: Download hat länger als ' + Math.round(ms / 60000) + ' Minuten gedauert und wurde abgebrochen.'));
+    }, ms);
+  });
+  return Promise.race([promise, watchdog]).finally(() => clearTimeout(timer));
+}
 
 const isHeadless    = process.argv.includes('--headless');
 const isStartHidden = process.argv.includes('--start-hidden');
@@ -52,12 +67,14 @@ if (isHeadless) {
       return;
     }
 
+    const abort = new AbortController();
     try {
-      const result = await runDownload(config, logger);
+      const result = await withWatchdog(runDownload(config, logger, abort.signal), abort);
       const summary = result.skipped
         ? 'Bereits heute geladen.'
         : result.files.length + ' Datei(en): ' + result.files.join(', ');
       logger.info('Download abgeschlossen: ' + summary);
+      await recordRunResult({ ok: true });
       showToast({
         title: 'OP ePaper – Dreieich',
         body: result.skipped ? 'Bereits heute geladen.' : '✓ ' + summary,
@@ -67,7 +84,12 @@ if (isHeadless) {
       app.exit(0);
     } catch (err) {
       logger.error('Download fehlgeschlagen: ' + err.message);
-      showToast({ title: 'OP ePaper – Fehler', body: err.message });
+      const fails = await recordRunResult({ ok: false, error: err.message });
+      // Eskalation: ab dem 2. Fehlschlag in Folge deutlicher warnen
+      const title = fails >= 2
+        ? `OP ePaper – Fehler (${fails}× in Folge!)`
+        : 'OP ePaper – Fehler';
+      showToast({ title, body: err.message });
       await new Promise(r => setTimeout(r, 2000));
       app.exit(1);
     }
@@ -194,7 +216,7 @@ ipcMain.handle('config:save', async (_e, updates) => {
   return { ok: true };
 });
 
-ipcMain.handle('download:start', async (event) => {
+ipcMain.handle('download:start', async (event, opts = {}) => {
   const logger = createLogger((line) => {
     // Log-Zeilen live an den Renderer pushen
     if (!event.sender.isDestroyed()) {
@@ -213,19 +235,30 @@ ipcMain.handle('download:start', async (event) => {
     return { ok: false, error: 'Zugangsdaten fehlen. Bitte in den Einstellungen konfigurieren.' };
   }
 
+  const targetDate = opts && opts.targetDate ? opts.targetDate : null;
+  const isCatchUp = !!targetDate;
+
   try {
     activeDownloadAbort = new AbortController();
-    await runDownload(config, logger, activeDownloadAbort.signal);
+    const result = await withWatchdog(
+      runDownload(config, logger, activeDownloadAbort.signal, { targetDate }),
+      activeDownloadAbort
+    );
     activeDownloadAbort = null;
+    // Aufhol-Läufe sollen den Tageslauf-Status nicht überschreiben
+    if (!isCatchUp) await recordRunResult({ ok: true });
     const cfg2 = await loadConfig();
-    const files = getFilesForToday(cfg2.outputDir);
-    if (tray) {
+    const files = isCatchUp
+      ? (result.files || [])
+      : getFilesForToday(cfg2.outputDir);
+    if (tray && !isCatchUp) {
       const last = new Date().toLocaleDateString('de-DE');
       tray.setToolTip('OP ePaper Tool – Dreieich\nLetzter Erfolg: ' + last);
     }
     return { ok: true, files };
   } catch (err) {
     activeDownloadAbort = null;
+    if (!isCatchUp) await recordRunResult({ ok: false, error: err.message });
     return { ok: false, error: err.message };
   }
 });
@@ -284,6 +317,36 @@ ipcMain.handle('login:test', async () => {
   } catch (err) {
     return { ok: false, error: err.message };
   }
+});
+
+ipcMain.handle('diagnostics:run', async () => {
+  try {
+    return await runSelfCheck(getChromiumPath);
+  } catch (err) {
+    return { ok: false, checks: [{ name: 'Selbsttest', ok: false, level: 'error', detail: err.message }] };
+  }
+});
+
+ipcMain.handle('missed:get', async () => {
+  try {
+    const cfg = await loadConfig();
+    const dates = findMissedDates(cfg);
+    return { dates };
+  } catch (err) {
+    return { dates: [], error: err.message };
+  }
+});
+
+// Persistenter Lauf-Status für den Fehler-Banner im Renderer
+ipcMain.handle('status:get', async () => {
+  const cfg = await loadConfig();
+  return {
+    lastSuccess: cfg.lastSuccess,
+    lastError: cfg.lastError,
+    lastErrorAt: cfg.lastErrorAt,
+    lastRunAt: cfg.lastRunAt,
+    consecutiveFailures: cfg.consecutiveFailures || 0,
+  };
 });
 
 ipcMain.handle('scheduler:create', async () => {

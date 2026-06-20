@@ -4,6 +4,11 @@ const path = require('path');
 const { app } = require('electron');
 const { saveConfig, loadConfig } = require('./config');
 
+// Format a Date (or undefined = today) as YYYY-MM-DD
+function formatDate(d) {
+  return (d ? new Date(d) : new Date()).toISOString().slice(0, 10);
+}
+
 // ---------------------------------------------------------------------------
 // Generic retry helper for network/timing-sensitive operations
 // ---------------------------------------------------------------------------
@@ -370,32 +375,124 @@ async function testLogin(config, logger) {
 }
 
 // ---------------------------------------------------------------------------
-// Main download function
+// Determine which past weekdays have NO downloaded files (i.e. were missed).
+// Looks back `catchUpDays` days, skips Sundays if configured, and excludes
+// today (handled by the normal run). Returns an array of YYYY-MM-DD strings,
+// newest first. Pure file-system check – fully testable without a browser.
 // ---------------------------------------------------------------------------
-async function runDownload(config, logger, abortSignal) {
+function findMissedDates(config) {
+  const { outputDir, catchUpDays = 7, skipSundays = true } = config;
+  const missed = [];
+  if (!outputDir) return missed;
+  const existing = fs.existsSync(outputDir) ? fs.readdirSync(outputDir) : [];
+
+  for (let back = 1; back <= catchUpDays; back++) {
+    const d = new Date();
+    d.setDate(d.getDate() - back);
+    if (skipSundays && d.getDay() === 0) continue;        // 0 = Sonntag
+    const stamp = formatDate(d);
+    const has = existing.some(f => f.startsWith('Dreieich_' + stamp) && f.endsWith('.pdf'));
+    if (!has) missed.push(stamp);
+  }
+  return missed;
+}
+
+// ---------------------------------------------------------------------------
+// Archive navigation for catch-up of a PAST edition.
+// The recorded codegen flow only covers the *current* edition, so this is a
+// best-effort attempt: it looks for a date / calendar control on the reader
+// page and tries to select `dateStr` (YYYY-MM-DD). If no such control can be
+// found, it throws a clear error rather than silently saving the wrong day's
+// content under a past-date filename.
+// ---------------------------------------------------------------------------
+async function navigateToArchiveDate(page, dateStr, logger) {
+  logger.info('Archiv: navigiere zu ' + dateStr);
+
+  // Try a native date input first (most reliable if present)
+  const dateInput = page.locator('input[type="date"]').first();
+  if (await dateInput.count().catch(() => 0)) {
+    await dateInput.fill(dateStr).catch(() => {});
+    await page.waitForTimeout(800);
+    const val = await dateInput.inputValue().catch(() => '');
+    if (val === dateStr) {
+      logger.info('Archiv: Datum über Datumsfeld gesetzt.');
+      await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+      return;
+    }
+  }
+
+  // Try a calendar / archive toggle, then a day cell carrying the ISO date
+  const calToggle = page.locator(
+    '[aria-label*="Kalender" i], [aria-label*="Datum" i], [aria-label*="Archiv" i], ' +
+    '[class*="calendar"], [class*="datepicker"], button[title*="Datum" i]'
+  ).first();
+  if (await calToggle.count().catch(() => 0)) {
+    await calToggle.click({ timeout: 4000 }).catch(() => {});
+    await page.waitForTimeout(500);
+    const dayCell = page.locator(
+      `[data-date="${dateStr}"], [aria-label*="${dateStr}"], time[datetime="${dateStr}"]`
+    ).first();
+    if (await dayCell.count().catch(() => 0)) {
+      await dayCell.click({ timeout: 4000 }).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+      logger.info('Archiv: Datum über Kalender ausgewählt.');
+      return;
+    }
+  }
+
+  throw new Error(
+    'Archiv-Navigation für ' + dateStr + ' nicht möglich – keine Datums-/Kalendersteuerung ' +
+    'im Portal gefunden. Bitte diese Ausgabe manuell im Portal laden, oder die Selektoren ' +
+    'nach einer codegen-Aufnahme des Archivs ergänzen.'
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Keep only the newest `keep` debug screenshots so the folder can't grow
+// unbounded across many failed runs.
+// ---------------------------------------------------------------------------
+function rotateScreenshots(screenshotDir, keep = 10) {
+  try {
+    if (!fs.existsSync(screenshotDir)) return;
+    const shots = fs.readdirSync(screenshotDir)
+      .filter(f => f.startsWith('error-') && f.endsWith('.png'))
+      .sort()
+      .reverse();
+    for (const old of shots.slice(keep)) {
+      try { fs.unlinkSync(path.join(screenshotDir, old)); } catch {}
+    }
+  } catch {}
+}
+
+// ---------------------------------------------------------------------------
+// Main download function.
+//   options.targetDate – optional Date/string for catch-up of a past edition.
+//                        Defaults to today (current edition).
+// ---------------------------------------------------------------------------
+async function runDownload(config, logger, abortSignal, options = {}) {
   const { username, password, outputDir } = config;
-  const today = new Date().toISOString().slice(0, 10);
+  const targetDate = options.targetDate ? new Date(options.targetDate) : null;
+  const today = formatDate(targetDate);
+  const isToday = !targetDate || formatDate() === today;
+  if (!isToday) logger.info('Rückwirkender Lauf für ' + today);
 
   // ------------------------------------------------------------------
   // IDEMPOTENZ: Skip if today's files all exist and pass integrity check.
   // Partial or corrupt downloads fall through for re-download.
   // ------------------------------------------------------------------
   try {
-    const cfg = await loadConfig();
-    if (cfg.lastSuccess && cfg.lastSuccess.slice(0, 10) === today) {
-      const existing = fs.existsSync(outputDir)
-        ? fs.readdirSync(outputDir).filter(f => f.startsWith(`Dreieich_${today}`) && f.endsWith('.pdf'))
-        : [];
-      if (existing.length > 0) {
-        const allValid = existing.every(f => {
-          try { verifyPdfIntegrity(path.join(outputDir, f)); return true; } catch { return false; }
-        });
-        if (allValid) {
-          logger.info('Bereits heute heruntergeladen (alle Dateien gueltig): ' + existing.join(', '));
-          return { skipped: true, files: existing };
-        }
-        logger.warn('Unvollstaendiger oder korrupter vorheriger Download – lade erneut herunter.');
+    const existing = fs.existsSync(outputDir)
+      ? fs.readdirSync(outputDir).filter(f => f.startsWith(`Dreieich_${today}`) && f.endsWith('.pdf'))
+      : [];
+    if (existing.length > 0) {
+      const allValid = existing.every(f => {
+        try { verifyPdfIntegrity(path.join(outputDir, f)); return true; } catch { return false; }
+      });
+      if (allValid) {
+        logger.info('Bereits für ' + today + ' heruntergeladen (alle Dateien gueltig): ' + existing.join(', '));
+        return { skipped: true, files: existing };
       }
+      logger.warn('Unvollstaendiger oder korrupter vorheriger Download – lade erneut herunter.');
     }
   } catch {}
 
@@ -472,6 +569,12 @@ async function runDownload(config, logger, abortSignal) {
     logger.info('[4/6] Ausgabe wählen');
     await page.getByRole('link', { name: /Offenbach-Post/ }).first().click({ timeout: 20_000 });
     await page.waitForLoadState('networkidle', { timeout: 30_000 });
+
+    // Rückwirkender Lauf: zur Archiv-Ausgabe des Zieldatums navigieren
+    if (!isToday) {
+      await navigateToArchiveDate(page, today, logger);
+    }
+
     await page.locator('rebrush-department-list-control').waitFor({ timeout: 20_000 });
 
     // ------------------------------------------------------------------
@@ -546,8 +649,12 @@ async function runDownload(config, logger, abortSignal) {
 
     logger.info('Fertig. ' + downloadedFiles.length + ' Datei(en) heruntergeladen.');
 
-    const cfg = await loadConfig();
-    await saveConfig({ ...cfg, lastSuccess: new Date().toISOString() });
+    // lastSuccess nur beim regulären Heute-Lauf setzen, damit ein Aufhol-Lauf
+    // den Status des letzten Tageslaufs nicht überschreibt.
+    if (isToday) {
+      const cfg = await loadConfig();
+      await saveConfig({ ...cfg, lastSuccess: new Date().toISOString() });
+    }
 
     return { skipped: false, files: downloadedFiles.map(f => path.basename(f)) };
 
@@ -557,6 +664,7 @@ async function runDownload(config, logger, abortSignal) {
       const screenshotPath = path.join(screenshotDir, `error-${today}-${Date.now()}.png`);
       await page.screenshot({ path: screenshotPath, fullPage: true });
       logger.error('Screenshot: ' + screenshotPath);
+      rotateScreenshots(screenshotDir, 10);
     } catch {}
     throw err;
 
@@ -565,4 +673,11 @@ async function runDownload(config, logger, abortSignal) {
   }
 }
 
-module.exports = { runDownload, getFilesForToday, testLogin, scoreDreieich };
+module.exports = {
+  runDownload,
+  getFilesForToday,
+  testLogin,
+  scoreDreieich,
+  findMissedDates,
+  getChromiumPath,
+};

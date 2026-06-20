@@ -13,6 +13,14 @@ const DEFAULTS = {
   scheduleHour: 6,
   scheduleMinute: 0,
   lastSuccess: null,
+  // --- Lauf-Status (für Fehler-Benachrichtigung) ---
+  lastRunAt: null,            // ISO-Zeitstempel des letzten Laufs (Erfolg ODER Fehler)
+  lastError: null,            // Fehlertext des letzten fehlgeschlagenen Laufs
+  lastErrorAt: null,          // ISO-Zeitstempel des letzten Fehlers
+  consecutiveFailures: 0,     // Anzahl Fehlschläge in Folge (für Eskalation)
+  // --- Rückwirkendes Laden ---
+  skipSundays: true,          // Sonntags erscheint i.d.R. keine Ausgabe
+  catchUpDays: 7,             // wie viele Tage rückwirkend auf Lücken geprüft wird
 };
 
 async function loadConfig() {
@@ -64,4 +72,27 @@ async function saveConfig(cfg) {
   fs.writeFileSync(file, JSON.stringify(toSave, null, 2), 'utf8');
 }
 
-module.exports = { loadConfig, saveConfig };
+// ---------------------------------------------------------------------------
+// Lauf-Ergebnis festhalten (Erfolg oder Fehler) – für Fehler-Benachrichtigung.
+// Bei Erfolg wird der Fehlerzustand zurückgesetzt; bei Fehler hochgezählt.
+// Gibt die neue consecutiveFailures-Zahl zurück (für Eskalation).
+// ---------------------------------------------------------------------------
+async function recordRunResult({ ok, error } = {}) {
+  const cfg = await loadConfig();
+  const now = new Date().toISOString();
+  cfg.lastRunAt = now;
+  if (ok) {
+    cfg.lastSuccess = now;
+    cfg.lastError = null;
+    cfg.lastErrorAt = null;
+    cfg.consecutiveFailures = 0;
+  } else {
+    cfg.lastError = (error || 'Unbekannter Fehler').toString().slice(0, 500);
+    cfg.lastErrorAt = now;
+    cfg.consecutiveFailures = (cfg.consecutiveFailures || 0) + 1;
+  }
+  await saveConfig(cfg);
+  return cfg.consecutiveFailures;
+}
+
+module.exports = { loadConfig, saveConfig, recordRunResult };
