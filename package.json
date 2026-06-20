@@ -18,20 +18,25 @@
   "build": {
     "appId": "de.dreieich.op-epaper-tool",
     "productName": "OP ePaper Tool",
+    "icon": "assets/icon.ico",
     "win": {
       "target": [
         { "target": "nsis", "arch": ["x64"] }
-      ]
+      ],
+      "icon": "assets/icon.ico"
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "runAfterFinish": true
     },
     "files": [
       "main.js",
       "preload.js",
       "core/**/*",
       "renderer/**/*",
+      "assets/**/*",
       "node_modules/**/*"
     ]
   }

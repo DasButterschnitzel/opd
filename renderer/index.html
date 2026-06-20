@@ -9,45 +9,89 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
+  <div class="bg-orbs" aria-hidden="true">
+    <span class="orb orb-1"></span>
+    <span class="orb orb-2"></span>
+    <span class="orb orb-3"></span>
+  </div>
+
   <div class="app">
 
     <!-- HEADER -->
     <header class="header">
-      <h1>OP ePaper Tool</h1>
-      <span class="subtitle">Dreieich · Stadtverwaltung</span>
+      <div class="brand">
+        <div class="logo" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"
+               stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 5h13v13a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z"></path>
+            <path d="M17 8h2.5A1.5 1.5 0 0 1 21 9.5V18a1 1 0 0 1-1 1"></path>
+            <line x1="7" y1="8" x2="14" y2="8"></line>
+            <line x1="7" y1="11" x2="14" y2="11"></line>
+            <line x1="7" y1="14" x2="11" y2="14"></line>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <h1>OP ePaper Tool</h1>
+          <span class="subtitle">Dreieich · Stadtverwaltung</span>
+        </div>
+      </div>
+      <div id="header-status" class="header-status">
+        <span class="status-dot"></span>
+        <span id="header-status-text">Bereit</span>
+      </div>
     </header>
 
     <!-- TABS -->
-    <nav class="tabs">
-      <button class="tab-btn active" data-tab="home">Start</button>
-      <button class="tab-btn" data-tab="settings">Einstellungen</button>
-      <button class="tab-btn" data-tab="log">Protokoll</button>
+    <nav class="tabs" role="tablist">
+      <button class="tab-btn active" data-tab="home">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-8 9 8"></path><path d="M5 10v10h14V10"></path></svg>
+        Start
+      </button>
+      <button class="tab-btn" data-tab="settings">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+        Einstellungen
+      </button>
+      <button class="tab-btn" data-tab="log">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><path d="M14 2v6h6"></path><line x1="8" y1="13" x2="16" y2="13"></line><line x1="8" y1="17" x2="16" y2="17"></line></svg>
+        Protokoll
+      </button>
     </nav>
 
     <!-- TAB: START -->
-    <section class="tab-content active" id="tab-home">
+    <section class="tab-content active" id="tab-home" role="tabpanel">
 
       <div class="status-card">
         <div class="status-row">
-          <span class="label">Letzter Erfolg:</span>
+          <span class="label">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path></svg>
+            Letzter Erfolg
+          </span>
           <span id="last-success" class="value">–</span>
         </div>
         <div class="status-row">
-          <span class="label">Zielordner:</span>
+          <span class="label">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7l2-3h5l2 3h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V7z"></path></svg>
+            Zielordner
+          </span>
           <span id="output-dir" class="value mono">–</span>
         </div>
         <div id="today-row" class="status-row today-row hidden">
-          <span class="label">Heute geladen:</span>
+          <span class="label">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"></path></svg>
+            Heute geladen
+          </span>
           <div id="today-files" class="today-files"></div>
         </div>
       </div>
 
       <div class="actions">
         <button id="btn-download" class="btn btn-primary">
-          <span class="icon">⬇</span> Jetzt herunterladen
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"></path><path d="M7 11l5 5 5-5"></path><path d="M5 21h14"></path></svg>
+          Jetzt herunterladen
         </button>
         <button id="btn-open-folder" class="btn btn-secondary">
-          <span class="icon">📁</span> Ordner öffnen
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7l2-3h5l2 3h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V7z"></path></svg>
+          Ordner öffnen
         </button>
       </div>
 
@@ -55,6 +99,7 @@
         <div class="spinner"></div>
         <div class="progress-info">
           <span id="progress-step">Download läuft…</span>
+          <div class="progress-track"><div class="progress-shine"></div></div>
         </div>
         <button id="btn-cancel" class="btn btn-cancel">✕ Abbrechen</button>
       </div>
@@ -62,28 +107,34 @@
       <div id="result-banner" class="result-banner hidden"></div>
 
       <div class="log-live-wrap">
-        <div class="log-header">Live-Log</div>
+        <div class="log-header">
+          <span class="log-header-dot"></span>
+          Live-Log
+        </div>
         <div id="live-log" class="log-box"></div>
       </div>
 
     </section>
 
     <!-- TAB: EINSTELLUNGEN -->
-    <section class="tab-content" id="tab-settings">
+    <section class="tab-content" id="tab-settings" role="tabpanel">
       <form id="settings-form" autocomplete="off">
         <fieldset>
           <legend>Zugangsdaten (OP-Online ePaper)</legend>
           <div class="field">
             <label for="inp-user">Benutzername / E-Mail</label>
-            <input id="inp-user" type="text" name="username" autocomplete="username" />
+            <input id="inp-user" type="text" name="username" autocomplete="username" placeholder="name@dreieich.de" />
           </div>
           <div class="field">
             <label for="inp-pass">Passwort</label>
-            <input id="inp-pass" type="password" name="password" autocomplete="current-password" />
-            <small>Wird verschlüsselt gespeichert (Windows DPAPI).</small>
+            <input id="inp-pass" type="password" name="password" autocomplete="current-password" placeholder="••••••••" />
+            <small>
+              <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+              Wird verschlüsselt gespeichert (Windows DPAPI).
+            </small>
           </div>
           <div class="field-row" style="margin-top:12px">
-            <button type="button" id="btn-test-login" class="btn btn-secondary">Zugangsdaten testen</button>
+            <button type="button" id="btn-test-login" class="btn btn-secondary btn-sm">Zugangsdaten testen</button>
             <span id="test-login-msg" class="inline-msg hidden"></span>
           </div>
         </fieldset>
@@ -92,7 +143,7 @@
           <legend>Zielordner</legend>
           <div class="field field-row">
             <input id="inp-dir" type="text" name="outputDir" readonly />
-            <button type="button" id="btn-select-dir" class="btn btn-secondary">Auswählen…</button>
+            <button type="button" id="btn-select-dir" class="btn btn-secondary btn-sm">Auswählen…</button>
           </div>
         </fieldset>
 
@@ -100,12 +151,12 @@
           <legend>Automatischer Tagesdownload</legend>
           <div class="field field-row">
             <label for="inp-hour">Uhrzeit:</label>
-            <input id="inp-hour" type="number" name="scheduleHour" min="0" max="23" style="width:4rem" />
-            <span>:</span>
-            <input id="inp-min" type="number" name="scheduleMinute" min="0" max="59" style="width:4rem" />
+            <input id="inp-hour" type="number" name="scheduleHour" min="0" max="23" class="time-input" />
+            <span class="time-sep">:</span>
+            <input id="inp-min" type="number" name="scheduleMinute" min="0" max="59" class="time-input" />
             <span class="hint">Uhr (Ausgabe ab ca. 04:00 online)</span>
           </div>
-          <button type="button" id="btn-create-task" class="btn btn-secondary">
+          <button type="button" id="btn-create-task" class="btn btn-secondary btn-sm">
             Windows-Aufgabe einrichten
           </button>
           <div id="task-result" class="inline-msg hidden"></div>
@@ -119,8 +170,9 @@
     </section>
 
     <!-- TAB: PROTOKOLL -->
-    <section class="tab-content" id="tab-log">
+    <section class="tab-content" id="tab-log" role="tabpanel">
       <div class="log-header">
+        <span class="log-header-dot"></span>
         Letzte Einträge
         <button id="btn-refresh-log" class="btn btn-xs">Aktualisieren</button>
       </div>

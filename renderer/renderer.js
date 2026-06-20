@@ -144,6 +144,17 @@ const progressStep = document.getElementById('progress-step');
 const resultBanner = document.getElementById('result-banner');
 const liveLog      = document.getElementById('live-log');
 
+// Header status pill ("Bereit" / "Lädt…" / "Fertig" / "Fehler")
+function setHeaderStatus(state, text) {
+  const pill = document.getElementById('header-status');
+  const txt  = document.getElementById('header-status-text');
+  if (!pill || !txt) return;
+  pill.classList.remove('busy', 'error');
+  if (state === 'busy')  pill.classList.add('busy');
+  if (state === 'error') pill.classList.add('error');
+  txt.textContent = text;
+}
+
 function appendLog(line) {
   const div = makeLogDiv(line);
   liveLog.appendChild(div);
@@ -160,6 +171,7 @@ btnDownload.addEventListener('click', async () => {
   resultBanner.classList.add('hidden');
   progressWrap.classList.remove('hidden');
   progressStep.textContent = 'Download läuft…';
+  setHeaderStatus('busy', 'Lädt…');
 
   const unsubscribe = window.api.onDownloadLog(appendLog);
   const result = await window.api.startDownload();
@@ -177,9 +189,11 @@ btnDownload.addEventListener('click', async () => {
     } else {
       resultBanner.textContent = '✓ Download abgeschlossen (Dateien bereits vorhanden).';
     }
+    setHeaderStatus('ok', 'Fertig');
   } else {
     resultBanner.classList.add('err');
     resultBanner.textContent = '✗ Fehler: ' + (result.error || 'Unbekannter Fehler');
+    setHeaderStatus('error', 'Fehler');
   }
 
   await refreshStatus();

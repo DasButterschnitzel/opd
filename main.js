@@ -15,7 +15,8 @@ const { loadConfig, saveConfig } = require('./core/config');
 const { runDownload, getFilesForToday, testLogin } = require('./core/downloader');
 const { createLogger, getRecentLogs } = require('./core/logger');
 
-const isHeadless = process.argv.includes('--headless');
+const isHeadless    = process.argv.includes('--headless');
+const isStartHidden = process.argv.includes('--start-hidden');
 
 // ---------------------------------------------------------------------------
 // Toast notifications (works in both GUI and headless mode)
@@ -90,6 +91,7 @@ function createWindow() {
     minWidth: 640,
     minHeight: 520,
     title: 'OP ePaper Tool – Dreieich',
+    show: !isStartHidden,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
