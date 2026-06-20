@@ -60,6 +60,19 @@
     <!-- TAB: START -->
     <section class="tab-content active" id="tab-home" role="tabpanel">
 
+      <!-- Persistenter Fehler-Banner (letzter Lauf fehlgeschlagen) -->
+      <div id="error-banner" class="alert-banner err hidden">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+        <span id="error-banner-text"></span>
+      </div>
+
+      <!-- Aufhol-Hinweis (verpasste Tage) -->
+      <div id="missed-banner" class="alert-banner warn hidden">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path></svg>
+        <span id="missed-banner-text"></span>
+        <button id="btn-catchup" class="btn btn-xs">Nachladen</button>
+      </div>
+
       <div class="status-card">
         <div class="status-row">
           <span class="label">
@@ -156,10 +169,23 @@
             <input id="inp-min" type="number" name="scheduleMinute" min="0" max="59" class="time-input" />
             <span class="hint">Uhr (Ausgabe ab ca. 04:00 online)</span>
           </div>
+          <div class="field field-row" style="margin-top:6px">
+            <label class="check-row">
+              <input id="inp-skip-sun" type="checkbox" name="skipSundays" />
+              <span>Sonntags überspringen (keine Ausgabe)</span>
+            </label>
+          </div>
           <button type="button" id="btn-create-task" class="btn btn-secondary btn-sm">
             Windows-Aufgabe einrichten
           </button>
           <div id="task-result" class="inline-msg hidden"></div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Diagnose</legend>
+          <p class="hint" style="margin-bottom:10px">Prüft Browser, Zielordner, Zugangsdaten und Verschlüsselung – ohne das Portal zu kontaktieren.</p>
+          <button type="button" id="btn-diagnostics" class="btn btn-secondary btn-sm">Selbsttest ausführen</button>
+          <div id="diag-results" class="diag-results hidden"></div>
         </fieldset>
 
         <div class="form-actions">

@@ -59,6 +59,43 @@ async function refreshStatus() {
   document.getElementById('output-dir').textContent = cfg.outputDir || '–';
 
   await refreshTodayFiles();
+  await refreshBanners();
+}
+
+// --------------------------------------------------------------------------
+// Fehler-Banner + Aufhol-Hinweis (verpasste Tage)
+// --------------------------------------------------------------------------
+let missedDates = [];
+
+async function refreshBanners() {
+  // Persistenter Fehler-Banner
+  const status = await window.api.getStatus();
+  const errBanner = document.getElementById('error-banner');
+  const errText = document.getElementById('error-banner-text');
+  const errIsRecent = status.lastError && (!status.lastSuccess ||
+    new Date(status.lastErrorAt) > new Date(status.lastSuccess));
+  if (errIsRecent) {
+    const when = status.lastErrorAt ? new Date(status.lastErrorAt).toLocaleString('de-DE') : '';
+    const streak = status.consecutiveFailures > 1 ? ` (${status.consecutiveFailures}× in Folge)` : '';
+    errText.textContent = `Letzter Lauf fehlgeschlagen${streak} am ${when}: ${status.lastError}`;
+    errBanner.classList.remove('hidden');
+  } else {
+    errBanner.classList.add('hidden');
+  }
+
+  // Verpasste Tage
+  const { dates } = await window.api.getMissedDates();
+  missedDates = dates || [];
+  const missedBanner = document.getElementById('missed-banner');
+  const missedText = document.getElementById('missed-banner-text');
+  if (missedDates.length) {
+    const list = missedDates.slice(0, 5).map(d => new Date(d).toLocaleDateString('de-DE')).join(', ');
+    const more = missedDates.length > 5 ? ` u. a. (${missedDates.length} gesamt)` : '';
+    missedText.textContent = `${missedDates.length} verpasste(r) Tag(e): ${list}${more}`;
+    missedBanner.classList.remove('hidden');
+  } else {
+    missedBanner.classList.add('hidden');
+  }
 }
 
 async function refreshTodayFiles() {
@@ -94,6 +131,7 @@ async function loadSettings() {
   document.getElementById('inp-dir').value   = cfg.outputDir || '';
   document.getElementById('inp-hour').value  = cfg.scheduleHour  ?? 6;
   document.getElementById('inp-min').value   = cfg.scheduleMinute ?? 0;
+  document.getElementById('inp-skip-sun').checked = cfg.skipSundays !== false;
 }
 
 document.getElementById('settings-form').addEventListener('submit', async (e) => {
@@ -105,6 +143,7 @@ document.getElementById('settings-form').addEventListener('submit', async (e) =>
     outputDir:      document.getElementById('inp-dir').value,
     scheduleHour:   parseInt(document.getElementById('inp-hour').value, 10),
     scheduleMinute: parseInt(document.getElementById('inp-min').value, 10),
+    skipSundays:    document.getElementById('inp-skip-sun').checked,
   });
   msg.classList.remove('hidden', 'err');
   msg.textContent = result.ok ? 'Gespeichert.' : 'Fehler beim Speichern.';
@@ -246,6 +285,69 @@ document.getElementById('btn-test-login').addEventListener('click', async () => 
   msg.textContent = result.ok ? '✓ Login erfolgreich!' : '✗ ' + (result.error || 'Fehler');
   if (!result.ok) msg.classList.add('err');
   setTimeout(() => msg.classList.add('hidden'), 6000);
+});
+
+// --------------------------------------------------------------------------
+// Verpasste Tage nachladen (Aufholen)
+// --------------------------------------------------------------------------
+document.getElementById('btn-catchup').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-catchup');
+  if (!missedDates.length) return;
+  btn.disabled = true;
+  liveLog.innerHTML = '';
+  resultBanner.classList.add('hidden');
+  progressWrap.classList.remove('hidden');
+  setHeaderStatus('busy', 'Aufholen…');
+
+  const unsubscribe = window.api.onDownloadLog(appendLog);
+  const ok = [], failed = [];
+  // Älteste zuerst nachladen
+  for (const date of [...missedDates].reverse()) {
+    progressStep.textContent = 'Lade nach: ' + new Date(date).toLocaleDateString('de-DE');
+    const res = await window.api.catchUpDownload(date);
+    if (res.ok) ok.push(date); else failed.push(date + ' (' + (res.error || 'Fehler') + ')');
+  }
+  unsubscribe();
+
+  progressWrap.classList.add('hidden');
+  btn.disabled = false;
+  resultBanner.classList.remove('hidden', 'ok', 'err');
+  if (failed.length === 0) {
+    resultBanner.classList.add('ok');
+    resultBanner.textContent = '✓ ' + ok.length + ' Tag(e) nachgeladen.';
+    setHeaderStatus('ok', 'Fertig');
+  } else {
+    resultBanner.classList.add('err');
+    resultBanner.textContent = '✓ ' + ok.length + ' nachgeladen, ✗ ' + failed.length + ' fehlgeschlagen:\n' + failed.join('\n');
+    setHeaderStatus('error', 'Teilweise');
+  }
+  await refreshStatus();
+});
+
+// --------------------------------------------------------------------------
+// Diagnose (Selbsttest)
+// --------------------------------------------------------------------------
+document.getElementById('btn-diagnostics').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-diagnostics');
+  const out = document.getElementById('diag-results');
+  btn.disabled = true;
+  out.classList.remove('hidden');
+  out.innerHTML = '<div class="diag-item"><span class="diag-detail">Prüfe…</span></div>';
+
+  const res = await window.api.runDiagnostics();
+  out.innerHTML = '';
+  for (const c of res.checks) {
+    const lvl = c.level || (c.ok ? 'ok' : 'error');
+    const icon = lvl === 'ok' ? '✓' : lvl === 'warn' ? '!' : '✕';
+    const item = document.createElement('div');
+    item.className = 'diag-item ' + lvl;
+    const i = document.createElement('span'); i.className = 'diag-icon'; i.textContent = icon;
+    const n = document.createElement('span'); n.className = 'diag-name'; n.textContent = c.name;
+    const d = document.createElement('span'); d.className = 'diag-detail'; d.textContent = c.detail || '';
+    item.append(i, n, d);
+    out.appendChild(item);
+  }
+  btn.disabled = false;
 });
 
 // --------------------------------------------------------------------------
