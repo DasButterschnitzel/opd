@@ -328,7 +328,7 @@ $shortcutsScript = Join-Path $ProjectDir 'scripts\install-shortcuts.ps1'
 if (Test-Path $shortcutsScript) {
     & $shortcutsScript -Autostart
 } else {
-    Info "install-shortcuts.ps1 nicht gefunden – bitte manuell ausfuehren."
+    Info "install-shortcuts.ps1 nicht gefunden - bitte manuell ausfuehren."
 }
 
 # =============================================================================
