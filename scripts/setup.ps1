@@ -320,6 +320,18 @@ if (-not $useExePath) {
 Ok "Browser: $useExePath"
 
 # =============================================================================
+# 5) DESKTOP-VERKNUEPFUNG + AUTOSTART
+# =============================================================================
+Step 5 "Desktop-Verknuepfung & Autostart"
+
+$shortcutsScript = Join-Path $ProjectDir 'scripts\install-shortcuts.ps1'
+if (Test-Path $shortcutsScript) {
+    & $shortcutsScript -Autostart
+} else {
+    Info "install-shortcuts.ps1 nicht gefunden – bitte manuell ausfuehren."
+}
+
+# =============================================================================
 # FERTIG
 # =============================================================================
 Write-Host ""
@@ -327,6 +339,6 @@ Write-Host "============================================================" -Foreg
 Write-Host " Alle Abhaengigkeiten bereit!" -ForegroundColor Green
 Write-Host "============================================================" -ForegroundColor Green
 Write-Host ""
-Write-Host " Naechster Schritt:  codegen.bat  (Selektoren aufnehmen)"
-Write-Host " Dann:               start.bat    (App starten)"
+Write-Host " App starten: Doppelklick auf 'OP ePaper Tool' auf dem Desktop"
+Write-Host " Oder:        start.bat"
 Write-Host ""
