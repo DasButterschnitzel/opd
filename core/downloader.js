@@ -669,52 +669,98 @@ function findMissedDates(config) {
 }
 
 // ---------------------------------------------------------------------------
-// Archive navigation for catch-up of a PAST edition.
-// The recorded codegen flow only covers the *current* edition, so this is a
-// best-effort attempt: it looks for a date / calendar control on the reader
-// page and tries to select `dateStr` (YYYY-MM-DD). If no such control can be
-// found, it throws a clear error rather than silently saving the wrong day's
-// content under a past-date filename.
+// Select a past edition date on the kiosk overview page using the
+// "Erscheinungstag wählen" dropdown. Must be called BEFORE entering the reader.
+// dateStr is YYYY-MM-DD; the dropdown lists entries in German locale format
+// like "Samstag, 21.06.2026".
 // ---------------------------------------------------------------------------
-async function navigateToArchiveDate(page, dateStr, logger) {
-  logger.info('Archiv: navigiere zu ' + dateStr);
+async function selectArchiveDateOnKiosk(page, dateStr, logger) {
+  const DE_DAYS = ['Sonntag', 'Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag'];
+  const d = new Date(dateStr + 'T12:00:00');
+  const germanDate = DE_DAYS[d.getDay()] + ', ' +
+    String(d.getDate()).padStart(2, '0') + '.' +
+    String(d.getMonth() + 1).padStart(2, '0') + '.' +
+    d.getFullYear();
+  const shortDate = String(d.getDate()).padStart(2, '0') + '.' +
+    String(d.getMonth() + 1).padStart(2, '0') + '.' +
+    d.getFullYear();
 
-  // Try a native date input first (most reliable if present)
-  const dateInput = page.locator('input[type="date"]').first();
-  if (await dateInput.count().catch(() => 0)) {
-    await dateInput.fill(dateStr).catch(() => {});
-    await page.waitForTimeout(800);
-    const val = await dateInput.inputValue().catch(() => '');
-    if (val === dateStr) {
-      logger.info('Archiv: Datum über Datumsfeld gesetzt.');
+  logger.info('Archiv: suche Ausgabe für ' + germanDate);
+  await dumpClickables(page, logger, 'Kiosk-Seite');
+
+  // Strategy A: native <select> – most reliable when present
+  const selects = page.locator('select');
+  const selectCount = await selects.count().catch(() => 0);
+  for (let i = 0; i < selectCount; i++) {
+    const sel = selects.nth(i);
+    // Full label match
+    try {
+      await sel.selectOption({ label: germanDate }, { timeout: 2000 });
       await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+      logger.info('Archiv: Datum über <select> gewählt: ' + germanDate);
       return;
-    }
+    } catch {}
+    // Partial label (DD.MM.YYYY)
+    try {
+      const options = await sel.evaluate(el =>
+        [...el.options].map(o => ({ value: o.value, text: o.text.trim() }))
+      );
+      const match = options.find(o => o.text.includes(shortDate));
+      if (match) {
+        await sel.selectOption({ value: match.value }, { timeout: 2000 });
+        await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+        logger.info('Archiv: Datum über <select> (Teilübereinstimmung) gewählt: ' + match.text);
+        return;
+      }
+    } catch {}
   }
 
-  // Try a calendar / archive toggle, then a day cell carrying the ISO date
-  const calToggle = page.locator(
-    '[aria-label*="Kalender" i], [aria-label*="Datum" i], [aria-label*="Archiv" i], ' +
-    '[class*="calendar"], [class*="datepicker"], button[title*="Datum" i]'
-  ).first();
-  if (await calToggle.count().catch(() => 0)) {
-    await calToggle.click({ timeout: 4000 }).catch(() => {});
-    await page.waitForTimeout(500);
-    const dayCell = page.locator(
-      `[data-date="${dateStr}"], [aria-label*="${dateStr}"], time[datetime="${dateStr}"]`
-    ).first();
-    if (await dayCell.count().catch(() => 0)) {
-      await dayCell.click({ timeout: 4000 }).catch(() => {});
-      await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
-      logger.info('Archiv: Datum über Kalender ausgewählt.');
-      return;
-    }
+  // Strategy B: custom dropdown – click trigger to open, then click date item
+  const triggerSelectors = [
+    '[placeholder*="Erscheinungstag" i]',
+    '[aria-label*="Erscheinungstag" i]',
+    '[aria-label*="Ausgabe" i]',
+    'button:has-text("Erscheinungstag")',
+    '[class*="date-select"] button',
+    '[class*="edition-select"] button',
+    '[class*="issue-select"] button',
+    'rebrush-kiosk [class*="select"] button',
+    'rebrush-kiosk select',
+  ];
+  for (const tSel of triggerSelectors) {
+    try {
+      const trigger = page.locator(tSel).first();
+      if (await trigger.count({ timeout: 500 }).catch(() => 0) === 0) continue;
+      await trigger.click({ timeout: 3000 });
+      await page.waitForTimeout(600);
+      for (const label of [germanDate, shortDate]) {
+        const item = page.getByText(label, { exact: true }).first();
+        if (await item.isVisible({ timeout: 1500 }).catch(() => false)) {
+          await item.click({ timeout: 3000 });
+          await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+          logger.info('Archiv: Datum über Dropdown gewählt ("' + tSel + '"): ' + label);
+          return;
+        }
+      }
+    } catch {}
+  }
+
+  // Strategy C: date text visible directly on the page (no trigger needed)
+  for (const label of [germanDate, shortDate]) {
+    try {
+      const el = page.getByText(label, { exact: true }).first();
+      if (await el.isVisible({ timeout: 1000 }).catch(() => false)) {
+        await el.click({ timeout: 3000 });
+        await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+        logger.info('Archiv: Datum direkt angeklickt: ' + label);
+        return;
+      }
+    } catch {}
   }
 
   throw new Error(
-    'Archiv-Navigation für ' + dateStr + ' nicht möglich – keine Datums-/Kalendersteuerung ' +
-    'im Portal gefunden. Bitte diese Ausgabe manuell im Portal laden, oder die Selektoren ' +
-    'nach einer codegen-Aufnahme des Archivs ergänzen.'
+    'Archiv-Navigation für ' + dateStr + ' (' + germanDate + ') nicht möglich – ' +
+    '"Erscheinungstag wählen" nicht gefunden. Bitte Debug-Screenshot der Kiosk-Seite prüfen.'
   );
 }
 
@@ -842,13 +888,21 @@ async function runDownload(config, logger, abortSignal, options = {}) {
     await page.waitForLoadState('networkidle', { timeout: 30_000 });
 
     // After clicking the nav link we may land on the kiosk overview (large
-    // edition thumbnail + "Erscheinungstag wählen" / "Ausgabe wählen" dropdowns)
-    // rather than directly in the reader.  Click the edition thumbnail to enter
-    // the reader when rebrush-department-list-control is not yet visible.
+    // edition thumbnail + "Erscheinungstag wählen" dropdown) rather than directly
+    // in the reader. For catch-up dates: select the archive date on the kiosk page
+    // FIRST, then click the edition thumbnail to enter the correct edition.
     const deptCtrl = page.locator('rebrush-department-list-control');
     const alreadyInReader = await deptCtrl.count({ timeout: 2000 }).catch(() => 0) > 0;
     if (!alreadyInReader) {
-      logger.info('Kiosk-Übersicht erkannt – öffne aktuelle Ausgabe...');
+      const label = isToday ? 'aktuelle Ausgabe' : 'Archiv-Ausgabe ' + today;
+      logger.info('Kiosk-Übersicht erkannt – öffne ' + label + '...');
+
+      // For catch-up: select the past date BEFORE entering the reader
+      if (!isToday) {
+        await selectArchiveDateOnKiosk(page, today, logger);
+        await page.waitForTimeout(800);
+      }
+
       const kiosk_strategies = [
         'rebrush-kiosk-item a',
         'rebrush-kiosk-item img',
@@ -895,11 +949,6 @@ async function runDownload(config, logger, abortSignal, options = {}) {
           'Bitte Debug-Screenshot prüfen.'
         );
       }
-    }
-
-    // Rückwirkender Lauf: zur Archiv-Ausgabe des Zieldatums navigieren
-    if (!isToday) {
-      await navigateToArchiveDate(page, today, logger);
     }
 
     // We are now inside the reader of the Offenbach-Post edition. The Dreieich
