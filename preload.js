@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('api', {
   // Download
   startDownload: () => ipcRenderer.invoke('download:start'),
   catchUpDownload: (targetDate) => ipcRenderer.invoke('download:start', { targetDate }),
+  catchUpBatch: (dates) => ipcRenderer.invoke('catchup:batch', dates),
   cancelDownload: () => ipcRenderer.invoke('download:abort'),
 
   // Diagnose / Status / verpasste Tage
