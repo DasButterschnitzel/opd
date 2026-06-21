@@ -510,38 +510,64 @@ async function openInhaltSection(page, text, logger) {
 }
 
 // ---------------------------------------------------------------------------
-// Read the current spread's page range, e.g. "38-39". Used to group sections
-// that share the same two-page spread. Tries the URL hash first
-// (…/904380/38-39), then the "X von 75" page indicator(s).
+// After navigating to a section, determine BOTH the spread range and the
+// specific page that was navigated to.
+//
+// Returns { spread: "30-31", currentPage: 30 }
+//   spread       – e.g. "30-31" (from URL hash) or "30" (single page)
+//   currentPage  – the exact ePaper page the Inhalt click landed on, or null
+//                  if it cannot be determined unambiguously.
+//
+// currentPage detection: the reader's "X von Y" navigation bar shows ONE
+// value when exactly one page counter is visible (= the navigated page).
+// If BOTH pages of a spread each show their own counter, we cannot tell which
+// one Dreieich is on and return null (caller falls back to menu-order logic).
 // ---------------------------------------------------------------------------
-async function getSpreadRange(page) {
+async function getPagePosition(page) {
+  let spread = null;
+  let currentPage = null;
+
+  // URL hash is the most reliable source for the spread, e.g. #/903932/30-31
   try {
     const segs = (page.url() || '').split(/[/#?]/).filter(Boolean);
     for (let i = segs.length - 1; i >= 0; i--) {
-      if (/^\d+(?:-\d+)?$/.test(segs[i])) return segs[i];
+      const seg = segs[i];
+      if (/^\d+-\d+$/.test(seg)) { spread = seg; break; }
+      if (/^\d+$/.test(seg)) { spread = seg; break; }
     }
   } catch {}
+
+  // "X von Y" indicators → tells us which page(s) are currently visible
   try {
     const nums = await page.evaluate(() => {
-      const out = [];
+      const out = new Set();
       document.querySelectorAll('*').forEach(el => {
         if (el.children.length) return;
         const m = (el.textContent || '').trim().match(/^(\d+)\s+von\s+\d+$/i);
-        if (m) out.push(m[1]);
+        if (m) out.add(parseInt(m[1]));
       });
-      return [...new Set(out)];
+      return [...out];
     });
-    if (nums.length) return nums.join('-');
+    const sorted = nums.sort((a, b) => a - b);
+    if (!spread && sorted.length > 0) spread = sorted.join('-');
+    if (sorted.length === 1) {
+      // Exactly one "X von Y" counter → that's the page we navigated to
+      currentPage = sorted[0];
+    }
+    // sorted.length > 1: both pages show a counter, can't tell which is ours
   } catch {}
-  return null;
+
+  return { spread, currentPage };
 }
 
 // ---------------------------------------------------------------------------
 // Decide, for each Dreieich section, which page of its spread to download.
 //  - Group sections by spread range.
-//  - Within a group (sorted by menu order): first = Linke Seite, last = Rechte
-//    Seite. A single section alone on a spread uses a score-based heuristic
-//    (pure "Dreieich" → Rechte, Kombiseite → Linke).
+//  - Single section on a spread: use currentPage vs. spread range to determine
+//    left (first/lower) or right (second/higher). Falls back to a warning when
+//    currentPage is unavailable.
+//  - Multiple sections on a spread (sorted by menu order): first = Linke Seite,
+//    last = Rechte Seite (menu order = page order, proven to work).
 // Mutates each section object by setting `.side`.
 // ---------------------------------------------------------------------------
 function assignSides(sections, logger) {
@@ -555,8 +581,24 @@ function assignSides(sections, logger) {
     group.sort((a, b) => a.order - b.order);
     if (group.length === 1) {
       const s = group[0];
-      s.side = s.score === 100 ? 'Rechte Seite' : 'Linke Seite';
+      const parts = (s.range || '').split('-').map(Number).filter(n => !isNaN(n));
+      if (s.currentPage != null && parts.length === 2) {
+        // Reliable: compare navigated page to spread boundaries
+        s.side = s.currentPage <= parts[0] ? 'Linke Seite' : 'Rechte Seite';
+        logger.info('Solo "' + s.text + '": Seite ' + s.currentPage +
+          ' in Spread ' + s.range + ' → ' + s.side);
+      } else if (parts.length === 1) {
+        // Single-page spread (no right page)
+        s.side = 'Linke Seite';
+        logger.info('Solo "' + s.text + '": Einzelseite → Linke Seite');
+      } else {
+        // Cannot determine reliably – log warning and use score heuristic
+        s.side = s.score === 100 ? 'Rechte Seite' : 'Linke Seite';
+        logger.warn('Solo "' + s.text + '": Seite nicht eindeutig bestimmbar ' +
+          '(Spread ' + (s.range || '?') + ') – Heuristik: ' + s.side);
+      }
     } else {
+      // Multiple sections: menu order = page order (first=links, last=rechts)
       group.forEach((s, idx) => {
         s.side = idx === 0 ? 'Linke Seite'
                : idx === group.length - 1 ? 'Rechte Seite'
@@ -948,8 +990,11 @@ async function runDownload(config, logger, abortSignal, options = {}) {
       }
       await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
       await page.waitForTimeout(1000);
-      sec.range = await getSpreadRange(page);
-      logger.info('Sektion "' + sec.text + '" → Spread ' + (sec.range || '?'));
+      const pos = await getPagePosition(page);
+      sec.range = pos.spread;
+      sec.currentPage = pos.currentPage;
+      logger.info('Sektion "' + sec.text + '" → Spread ' + (sec.range || '?') +
+        (sec.currentPage != null ? ', Seite ' + sec.currentPage : ''));
     }
 
     const active = sections.filter(s => !s.skip);
