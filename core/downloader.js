@@ -476,10 +476,14 @@ async function collectDreieichSections(page) {
     const score = scoreDreieich(text);
     if (score > 0 && !seen.has(text)) {
       seen.add(text);
-      sections.push({ text, score });
+      // `order` = position in the Inhalt menu = reading/page order. This is the
+      // key signal for left/right: within one two-page spread the section that
+      // appears earlier in the menu is the LEFT page, the later one the RIGHT.
+      sections.push({ text, score, order: i });
     }
   }
-  sections.sort((a, b) => b.score - a.score);
+  // keep menu (page) order
+  sections.sort((a, b) => a.order - b.order);
   return sections;
 }
 
@@ -506,127 +510,91 @@ async function openInhaltSection(page, text, logger) {
 }
 
 // ---------------------------------------------------------------------------
-// Detect which page side (Linke/Rechte Seite) the target section occupies in
-// the current two-page spread. Scans the DOM for visible text containing
-// "Dreieich" and checks each element's horizontal midpoint against the
-// viewport midpoint. Falls back to a heuristic when the reader uses canvas
-// rendering (no accessible text nodes).
+// Read the current spread's page range, e.g. "38-39". Used to group sections
+// that share the same two-page spread. Tries the URL hash first
+// (…/904380/38-39), then the "X von 75" page indicator(s).
 // ---------------------------------------------------------------------------
-async function detectSectionSide(page, sectionText, logger) {
+async function getSpreadRange(page) {
   try {
-    const { hits } = await page.evaluate(() => {
-      const vw = window.innerWidth || document.documentElement.clientWidth;
-      const mid = vw / 2;
-      const hits = [];
-      document.querySelectorAll('*').forEach(el => {
-        if (el.children.length > 5) return;
-        const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ');
-        if (!text || text.length > 80 || !/dreieich/i.test(text)) return;
-        const rect = el.getBoundingClientRect();
-        if (rect.width < 2 || rect.height < 2) return;
-        hits.push({ text, side: (rect.left + rect.width / 2) < mid ? 'Linke Seite' : 'Rechte Seite' });
-      });
-      return { hits };
-    });
-
-    if (hits.length > 0) {
-      const unique = [...new Map(hits.map(h => [h.text, h])).values()];
-      logger.info('Seitenanalyse (DOM): ' + unique.map(h => '"' + h.text + '" → ' + h.side).join(' | '));
-
-      // Prefer exact match of sectionText
-      const targetLower = sectionText.toLowerCase();
-      const exact = unique.find(h => h.text.toLowerCase() === targetLower);
-      if (exact) return exact.side;
-
-      // Next: highest scoreDreieich among hits
-      let best = null, bestScore = -1;
-      for (const h of unique) {
-        const s = scoreDreieich(h.text);
-        if (s > bestScore) { bestScore = s; best = h; }
-      }
-      if (best) return best.side;
+    const segs = (page.url() || '').split(/[/#?]/).filter(Boolean);
+    for (let i = segs.length - 1; i >= 0; i--) {
+      if (/^\d+(?:-\d+)?$/.test(segs[i])) return segs[i];
     }
-  } catch (e) {
-    logger.warn('Seitenanalyse fehlgeschlagen: ' + e.message);
-  }
-
-  // Heuristic fallback: pure Dreieich pages (score=100) tend to fall on the
-  // right when paired with a Kombiseite; Kombiseiten tend to be on the left.
-  const side = scoreDreieich(sectionText) === 100 ? 'Rechte Seite' : 'Linke Seite';
-  logger.warn('Seitenanalyse: kein DOM-Treffer – Heuristik: ' + side);
-  return side;
-}
-
-// Pick the download-dialog option that best matches the desired side.
-// Returns the option text, or null if no side-specific option found.
-function pickSideOption(options, targetSide) {
-  const tl = (targetSide || '').toLowerCase();
-  if (!tl) return null;
-  const isLeft  = tl.includes('link');
-  const isRight = tl.includes('recht') || tl.includes('right');
-  const match = options.find(o => {
-    const ol = o.toLowerCase();
-    if (isLeft)  return ol.includes('link') || ol.includes('left');
-    if (isRight) return ol.includes('recht') || ol.includes('right');
-    return false;
-  });
-  return match || null;
-}
-
-// ---------------------------------------------------------------------------
-// Download whatever is currently displayed in the reader.
-//   targetSide – 'Linke Seite' | 'Rechte Seite' | null
-//   Strategy 1: toolbar "Download" fires a direct download -> save as baseFile.
-//   Strategy 2: a dialog/menu opens (e.g. Linke/Rechte Seite) -> pick the
-//               option matching targetSide; fall back to all options if unclear.
-// Returns the list of saved file paths.
-// ---------------------------------------------------------------------------
-async function downloadCurrentView(page, baseFile, targetSide, logger) {
-  const saved = [];
+  } catch {}
   try {
-    const [dl] = await Promise.all([
-      page.waitForEvent('download', { timeout: 15_000 }),
-      clickReaderButton(page, 'Download', logger),
-    ]);
-    await dl.saveAs(baseFile);
-    verifyPdfIntegrity(baseFile);
-    saved.push(baseFile);
-    logger.info('Gespeichert: ' + path.basename(baseFile));
-    return saved;
-  } catch (e) {
-    logger.warn('Kein direkter Download: ' + e.message);
+    const nums = await page.evaluate(() => {
+      const out = [];
+      document.querySelectorAll('*').forEach(el => {
+        if (el.children.length) return;
+        const m = (el.textContent || '').trim().match(/^(\d+)\s+von\s+\d+$/i);
+        if (m) out.push(m[1]);
+      });
+      return [...new Set(out)];
+    });
+    if (nums.length) return nums.join('-');
+  } catch {}
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Decide, for each Dreieich section, which page of its spread to download.
+//  - Group sections by spread range.
+//  - Within a group (sorted by menu order): first = Linke Seite, last = Rechte
+//    Seite. A single section alone on a spread uses a score-based heuristic
+//    (pure "Dreieich" → Rechte, Kombiseite → Linke).
+// Mutates each section object by setting `.side`.
+// ---------------------------------------------------------------------------
+function assignSides(sections, logger) {
+  const groups = new Map();
+  for (const s of sections) {
+    const key = s.range || ('solo-' + s.text);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(s);
   }
-
-  await dumpClickables(page, logger, 'Download-Dialog');
-  const options = await getDropdownOptions(page, logger);
-  const stem = baseFile.replace(/\.pdf$/i, '');
-
-  // Prefer the side-specific option when we know which side to get
-  const chosen = pickSideOption(options, targetSide);
-  const toDownload = chosen ? [chosen] : options;
-  if (chosen) {
-    logger.info('Wähle Seiten-Option: "' + chosen + '" (Ziel: ' + targetSide + ')');
-  } else {
-    logger.warn('Keine passende Seiten-Option gefunden – lade alle: ' + options.join(', '));
+  for (const [range, group] of groups) {
+    group.sort((a, b) => a.order - b.order);
+    if (group.length === 1) {
+      const s = group[0];
+      s.side = s.score === 100 ? 'Rechte Seite' : 'Linke Seite';
+    } else {
+      group.forEach((s, idx) => {
+        s.side = idx === 0 ? 'Linke Seite'
+               : idx === group.length - 1 ? 'Rechte Seite'
+               : 'Linke Seite';
+      });
+    }
+    logger.info('Spread ' + range + ': ' +
+      group.map(s => '"' + s.text + '" → ' + s.side).join(' | '));
   }
+}
 
-  for (const optText of toDownload) {
-    const safeSuffix = toSafeFilename(optText);
-    const f = safeSuffix ? stem + '_' + safeSuffix + '.pdf' : baseFile;
+// ---------------------------------------------------------------------------
+// Download one specific page side ("Linke Seite" / "Rechte Seite") of the
+// currently displayed spread via the reader toolbar. Opens the Download menu,
+// clicks the exact side entry, and saves the resulting PDF to outFile.
+// ---------------------------------------------------------------------------
+async function downloadSide(page, side, outFile, logger) {
+  for (let attempt = 1; attempt <= 2; attempt++) {
     try {
+      // Open the Download submenu (Ganze Ausgabe / Linke Seite / Rechte Seite …)
+      await clickReaderButton(page, 'Download', logger, { optional: true });
+      await page.waitForTimeout(500);
       const [dl] = await Promise.all([
         page.waitForEvent('download', { timeout: 30_000 }),
-        page.getByText(optText, { exact: false }).first().click({ timeout: 5000 }),
+        page.getByText(side, { exact: true }).first().click({ timeout: 5000 }),
       ]);
-      await dl.saveAs(f);
-      verifyPdfIntegrity(f);
-      saved.push(f);
-      logger.info('Gespeichert: ' + path.basename(f));
-    } catch (e2) {
-      logger.warn('Option "' + optText + '" nicht ladbar: ' + e2.message);
+      await dl.saveAs(outFile);
+      const failure = await dl.failure();
+      if (failure) throw new Error(failure);
+      verifyPdfIntegrity(outFile);
+      logger.info('Gespeichert: ' + path.basename(outFile) + ' (' + side + ')');
+      return true;
+    } catch (e) {
+      logger.warn('Download "' + side + '" Versuch ' + attempt + ' fehlgeschlagen: ' + e.message);
+      await page.waitForTimeout(1200);
     }
   }
-  return saved;
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -965,38 +933,57 @@ async function runDownload(config, logger, abortSignal, options = {}) {
     }
 
     // ------------------------------------------------------------------
-    // 5+6) JEDE DREIEICH-SEKTION ÖFFNEN UND HERUNTERLADEN
+    // 5) JEDE SEKTION ÖFFNEN, SPREAD-BEREICH ERMITTELN, SEITE ZUORDNEN
+    //    Beide Dreieich-Sektionen liegen oft auf EINEM Zweiseitenblick
+    //    (z.B. 38-39 = gedruckt 35 links / 36 rechts). Über die Menü-
+    //    Reihenfolge bestimmen wir, welche Sektion links bzw. rechts steht.
     // ------------------------------------------------------------------
-    logger.info('[6/6] Dreieich-Sektion(en) herunterladen');
-    const downloadedFiles = [];
-    const seenBasenames = new Set();
+    logger.info('[6/6] Seiten zuordnen & herunterladen');
     for (const sec of sections) {
-      logger.info('Öffne Sektion: "' + sec.text + '"');
       const opened = await openInhaltSection(page, sec.text, logger);
       if (!opened) {
         logger.warn('Sektion "' + sec.text + '" nicht anklickbar – übersprungen.');
+        sec.skip = true;
         continue;
       }
       await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
-      await page.waitForTimeout(1200);
-      await dumpClickables(page, logger, 'vor-Download');
+      await page.waitForTimeout(1000);
+      sec.range = await getSpreadRange(page);
+      logger.info('Sektion "' + sec.text + '" → Spread ' + (sec.range || '?'));
+    }
 
-      // Determine which side of the two-page spread our section is on,
-      // so we download only the correct page (not the neighbouring section).
-      const targetSide = await detectSectionSide(page, sec.text, logger);
+    const active = sections.filter(s => !s.skip);
+    assignSides(active, logger);
 
-      const base = path.join(outputDir, `Dreieich_${today}_${toSafeFilename(sec.text)}.pdf`);
-      const saved = await downloadCurrentView(page, base, targetSide, logger);
-      for (const f of saved) {
-        const bn = path.basename(f);
-        if (!seenBasenames.has(bn)) { seenBasenames.add(bn); downloadedFiles.push(f); }
+    // ------------------------------------------------------------------
+    // 6) GEZIELTEN SEITEN-DOWNLOAD AUSFÜHREN
+    // ------------------------------------------------------------------
+    const downloadedFiles = [];
+    const seenSpreadSide = new Set();   // dedupe: same spread+side only once
+    for (const sec of active) {
+      const key = (sec.range || sec.text) + '|' + sec.side;
+      if (seenSpreadSide.has(key)) {
+        logger.info('Überspringe Duplikat: "' + sec.text + '" (' + sec.side + ' auf Spread ' + sec.range + ' bereits geladen)');
+        continue;
+      }
+      logger.info('Öffne Sektion: "' + sec.text + '" (' + sec.side + ')');
+      const opened = await openInhaltSection(page, sec.text, logger);
+      if (!opened) { logger.warn('Sektion "' + sec.text + '" nicht anklickbar – übersprungen.'); continue; }
+      await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+      await page.waitForTimeout(1000);
+
+      const outFile = path.join(outputDir, `Dreieich_${today}_${toSafeFilename(sec.text)}.pdf`);
+      const ok = await downloadSide(page, sec.side, outFile, logger);
+      if (ok) {
+        seenSpreadSide.add(key);
+        downloadedFiles.push(outFile);
       }
     }
 
     if (downloadedFiles.length === 0) {
       throw new Error(
-        'Kein Download ausgelöst. Bitte Protokoll ("Sichtbare Elemente"/"Download-Dialog") ' +
-        'und Screenshot prüfen – die Toolbar- bzw. Inhalt-Struktur muss noch feinjustiert werden.'
+        'Kein Download ausgelöst. Bitte Protokoll und Screenshot prüfen – ' +
+        'die Toolbar- bzw. Inhalt-Struktur muss noch feinjustiert werden.'
       );
     }
 
