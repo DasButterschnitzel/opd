@@ -453,12 +453,33 @@ async function findDreieichAnywhere(page, logger) {
 }
 
 // ---------------------------------------------------------------------------
-// Collect EVERY section entry whose name contains "Dreieich" as a whole word.
-// Returns a deduplicated, score-sorted list [{ text, score }] so that both the
-// pure "Dreieich" page (100) and Kombiseiten like "Langen/Egelsbach/Dreieich"
-// (80) are downloaded. On combo-only days the combo entry is still captured.
+// Toolbar / non-section labels that share the broad item selector with the
+// real Inhalt menu entries. Filtered out so the local city sections stay
+// contiguous and neighbour lookup (order±1) stays reliable.
 // ---------------------------------------------------------------------------
-async function collectDreieichSections(page) {
+const TOOLBAR_LABELS = new Set([
+  'schließen', 'schliessen', 'inhalt', 'seitenübersicht', 'seitenubersicht',
+  'download', 'ganze ausgabe', 'linke seite', 'rechte seite',
+  'ausgewählte seiten', 'ausgewaehlte seiten', 'drucken', 'mehr',
+  'artikel aus', 'artikel an', 'einzelseiten zeigen', 'vollbild',
+  'mehr artikel aus einzelseiten zeigen vollbild',
+]);
+
+function isToolbarLabel(text) {
+  const t = text.toLowerCase();
+  if (TOOLBAR_LABELS.has(t)) return true;
+  if (/^[\d.\s]+$/.test(text)) return true;          // pure numbers / coords
+  if (/^\d+\s+von\s+\d+$/i.test(text)) return true;  // "1 von 42" page counter
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Collect EVERY entry in the open Inhalt menu (deduplicated, in DOM = page
+// order). Returns [{ text, score, order }] where `order` is a compacted
+// 0..n-1 index in menu order so that immediate neighbours (order±1) are the
+// adjacent newspaper sections – the key signal for left/right placement.
+// ---------------------------------------------------------------------------
+async function collectAllSections(page) {
   const itemSel = 'a,button,li,[role="button"],[role="menuitem"],[role="option"],' +
                   '[class*="item"],[class*="chapter"],[class*="toc"]';
   const loc = page.locator(itemSel);
@@ -473,18 +494,19 @@ async function collectDreieichSections(page) {
       text = ((await el.textContent().catch(() => '')) || '').trim().replace(/\s+/g, ' ');
     } catch { continue; }
     if (!text || text.length > 60) continue;
-    const score = scoreDreieich(text);
-    if (score > 0 && !seen.has(text)) {
-      seen.add(text);
-      // `order` = position in the Inhalt menu = reading/page order. This is the
-      // key signal for left/right: within one two-page spread the section that
-      // appears earlier in the menu is the LEFT page, the later one the RIGHT.
-      sections.push({ text, score, order: i });
-    }
+    if (seen.has(text) || isToolbarLabel(text)) continue;
+    seen.add(text);
+    sections.push({ text, score: scoreDreieich(text), domIndex: i });
   }
-  // keep menu (page) order
-  sections.sort((a, b) => a.order - b.order);
+  sections.sort((a, b) => a.domIndex - b.domIndex);
+  sections.forEach((s, idx) => { s.order = idx; });   // compact: neighbours = order±1
   return sections;
+}
+
+// Backwards-compatible: only the Dreieich-relevant entries.
+async function collectDreieichSections(page) {
+  const all = await collectAllSections(page);
+  return all.filter(s => s.score > 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1009,7 +1031,8 @@ async function runDownload(config, logger, abortSignal, options = {}) {
     await page.waitForTimeout(1200);
     await dumpClickables(page, logger, 'Inhalt-Menü');
 
-    const sections = await collectDreieichSections(page);
+    const allSections = await collectAllSections(page);
+    const sections = allSections.filter(s => s.score > 0);
     if (sections.length === 0) {
       throw new Error(
         'Keine Dreieich-Sektion im Inhalt gefunden. Bitte Protokoll ("Inhalt-Menü") und ' +
@@ -1024,13 +1047,28 @@ async function runDownload(config, logger, abortSignal, options = {}) {
     }
 
     // ------------------------------------------------------------------
-    // 5) JEDE SEKTION ÖFFNEN, SPREAD-BEREICH ERMITTELN, SEITE ZUORDNEN
-    //    Beide Dreieich-Sektionen liegen oft auf EINEM Zweiseitenblick
-    //    (z.B. 38-39 = gedruckt 35 links / 36 rechts). Über die Menü-
-    //    Reihenfolge bestimmen wir, welche Sektion links bzw. rechts steht.
+    // 5) PROBE-SET BILDEN, SPREAD-BEREICH ERMITTELN, SEITE ZUORDNEN
+    //    Dreieich liegt mal links, mal rechts auf seinem Zweiseitenblick und
+    //    der Seitenindikator im DOM ist unzuverlässig ("1 von 42"). Deshalb
+    //    prüfen wir zusätzlich die direkten Menü-NACHBARN jeder Dreieich-
+    //    Sektion: die Nachbarsektion, die sich denselben Spread teilt,
+    //    entscheidet per Menü-Reihenfolge über links/rechts (frühere
+    //    Menüposition = linke Seite).
+    //    Beispiel 15.06.: Dreieich (S.28) + Neu-Isenburg (S.29) auf Spread
+    //    30-31 → Dreieich steht im Menü davor → linke Seite.
     // ------------------------------------------------------------------
     logger.info('[6/6] Seiten zuordnen & herunterladen');
-    for (const sec of sections) {
+    const probeOrders = new Set();
+    for (const s of sections) {
+      probeOrders.add(s.order);
+      if (s.order > 0) probeOrders.add(s.order - 1);
+      if (s.order < allSections.length - 1) probeOrders.add(s.order + 1);
+    }
+    const probe = allSections
+      .filter(s => probeOrders.has(s.order))
+      .sort((a, b) => a.order - b.order);
+
+    for (const sec of probe) {
       const opened = await openInhaltSection(page, sec.text, logger);
       if (!opened) {
         logger.warn('Sektion "' + sec.text + '" nicht anklickbar – übersprungen.');
@@ -1042,12 +1080,15 @@ async function runDownload(config, logger, abortSignal, options = {}) {
       const pos = await getPagePosition(page);
       sec.range = pos.spread;
       sec.currentPage = pos.currentPage;
-      logger.info('Sektion "' + sec.text + '" → Spread ' + (sec.range || '?') +
+      const tag = sec.score > 0 ? '' : ' (Nachbar)';
+      logger.info('Sektion "' + sec.text + '"' + tag + ' → Spread ' + (sec.range || '?') +
         (sec.currentPage != null ? ', Seite ' + sec.currentPage : ''));
     }
 
-    const active = sections.filter(s => !s.skip);
-    assignSides(active, logger);
+    // Seiten über das gesamte Probe-Set zuordnen (Nachbarn liefern die
+    // Spread-Partner), danach nur die Dreieich-Sektionen herunterladen.
+    assignSides(probe.filter(s => !s.skip), logger);
+    const active = probe.filter(s => !s.skip && s.score > 0);
 
     // ------------------------------------------------------------------
     // 6) GEZIELTEN SEITEN-DOWNLOAD AUSFÜHREN
