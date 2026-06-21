@@ -174,6 +174,34 @@ async function getDropdownOptions(page, logger) {
     }
   } catch {}
 
+  // Strategy D: generic menus/dropdowns that appeared after clicking the
+  // toolbar Download button (not inside rebrush-download).
+  const genericStrategies = [
+    '[role="menu"] button',
+    '[role="menu"] [role="menuitem"]',
+    '[role="listbox"] [role="option"]',
+    '.mat-menu-content button',
+    '[class*="dropdown-menu"] li',
+    '[class*="dropdown-menu"] button',
+    '[class*="popup"] button',
+    '[class*="popup"] li',
+    '[class*="context-menu"] li',
+    '[class*="context-menu"] button',
+  ];
+  for (const sel of genericStrategies) {
+    try {
+      const loc = page.locator(sel);
+      const cnt = await loc.count({ timeout: 600 });
+      if (cnt > 0) {
+        const texts = (await loc.allTextContents()).map(t => t.trim()).filter(t => t.length > 1 && t.length < 60);
+        if (texts.length) {
+          logger.info('Dropdown-Optionen [generic/' + sel + ']: ' + texts.join(', '));
+          return texts;
+        }
+      }
+    } catch {}
+  }
+
   // Fallback: the options recorded by codegen
   logger.warn('Dropdown-Optionen nicht automatisch erkannt – nutze Standardnamen.');
   return ['Linke Seite', 'Rechte Seite'];
@@ -478,13 +506,82 @@ async function openInhaltSection(page, text, logger) {
 }
 
 // ---------------------------------------------------------------------------
+// Detect which page side (Linke/Rechte Seite) the target section occupies in
+// the current two-page spread. Scans the DOM for visible text containing
+// "Dreieich" and checks each element's horizontal midpoint against the
+// viewport midpoint. Falls back to a heuristic when the reader uses canvas
+// rendering (no accessible text nodes).
+// ---------------------------------------------------------------------------
+async function detectSectionSide(page, sectionText, logger) {
+  try {
+    const { hits } = await page.evaluate(() => {
+      const vw = window.innerWidth || document.documentElement.clientWidth;
+      const mid = vw / 2;
+      const hits = [];
+      document.querySelectorAll('*').forEach(el => {
+        if (el.children.length > 5) return;
+        const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ');
+        if (!text || text.length > 80 || !/dreieich/i.test(text)) return;
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 2 || rect.height < 2) return;
+        hits.push({ text, side: (rect.left + rect.width / 2) < mid ? 'Linke Seite' : 'Rechte Seite' });
+      });
+      return { hits };
+    });
+
+    if (hits.length > 0) {
+      const unique = [...new Map(hits.map(h => [h.text, h])).values()];
+      logger.info('Seitenanalyse (DOM): ' + unique.map(h => '"' + h.text + '" → ' + h.side).join(' | '));
+
+      // Prefer exact match of sectionText
+      const targetLower = sectionText.toLowerCase();
+      const exact = unique.find(h => h.text.toLowerCase() === targetLower);
+      if (exact) return exact.side;
+
+      // Next: highest scoreDreieich among hits
+      let best = null, bestScore = -1;
+      for (const h of unique) {
+        const s = scoreDreieich(h.text);
+        if (s > bestScore) { bestScore = s; best = h; }
+      }
+      if (best) return best.side;
+    }
+  } catch (e) {
+    logger.warn('Seitenanalyse fehlgeschlagen: ' + e.message);
+  }
+
+  // Heuristic fallback: pure Dreieich pages (score=100) tend to fall on the
+  // right when paired with a Kombiseite; Kombiseiten tend to be on the left.
+  const side = scoreDreieich(sectionText) === 100 ? 'Rechte Seite' : 'Linke Seite';
+  logger.warn('Seitenanalyse: kein DOM-Treffer – Heuristik: ' + side);
+  return side;
+}
+
+// Pick the download-dialog option that best matches the desired side.
+// Returns the option text, or null if no side-specific option found.
+function pickSideOption(options, targetSide) {
+  const tl = (targetSide || '').toLowerCase();
+  if (!tl) return null;
+  const isLeft  = tl.includes('link');
+  const isRight = tl.includes('recht') || tl.includes('right');
+  const match = options.find(o => {
+    const ol = o.toLowerCase();
+    if (isLeft)  return ol.includes('link') || ol.includes('left');
+    if (isRight) return ol.includes('recht') || ol.includes('right');
+    return false;
+  });
+  return match || null;
+}
+
+// ---------------------------------------------------------------------------
 // Download whatever is currently displayed in the reader.
+//   targetSide – 'Linke Seite' | 'Rechte Seite' | null
 //   Strategy 1: toolbar "Download" fires a direct download -> save as baseFile.
-//   Strategy 2: a dialog/menu opens (e.g. Linke/Rechte Seite) -> download each
-//               offered option, suffixing the filename.
+//   Strategy 2: a dialog/menu opens (e.g. Linke/Rechte Seite) -> pick the
+//               option matching targetSide; fall back to all options if unclear.
 // Returns the list of saved file paths.
 // ---------------------------------------------------------------------------
-async function downloadCurrentView(page, baseFile, logger) {
+async function downloadCurrentView(page, baseFile, targetSide, logger) {
   const saved = [];
   try {
     const [dl] = await Promise.all([
@@ -503,8 +600,19 @@ async function downloadCurrentView(page, baseFile, logger) {
   await dumpClickables(page, logger, 'Download-Dialog');
   const options = await getDropdownOptions(page, logger);
   const stem = baseFile.replace(/\.pdf$/i, '');
-  for (const optText of options) {
-    const f = stem + '_' + toSafeFilename(optText) + '.pdf';
+
+  // Prefer the side-specific option when we know which side to get
+  const chosen = pickSideOption(options, targetSide);
+  const toDownload = chosen ? [chosen] : options;
+  if (chosen) {
+    logger.info('Wähle Seiten-Option: "' + chosen + '" (Ziel: ' + targetSide + ')');
+  } else {
+    logger.warn('Keine passende Seiten-Option gefunden – lade alle: ' + options.join(', '));
+  }
+
+  for (const optText of toDownload) {
+    const safeSuffix = toSafeFilename(optText);
+    const f = safeSuffix ? stem + '_' + safeSuffix + '.pdf' : baseFile;
     try {
       const [dl] = await Promise.all([
         page.waitForEvent('download', { timeout: 30_000 }),
@@ -870,11 +978,15 @@ async function runDownload(config, logger, abortSignal, options = {}) {
         continue;
       }
       await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
-      await page.waitForTimeout(1000);
+      await page.waitForTimeout(1200);
       await dumpClickables(page, logger, 'vor-Download');
 
+      // Determine which side of the two-page spread our section is on,
+      // so we download only the correct page (not the neighbouring section).
+      const targetSide = await detectSectionSide(page, sec.text, logger);
+
       const base = path.join(outputDir, `Dreieich_${today}_${toSafeFilename(sec.text)}.pdf`);
-      const saved = await downloadCurrentView(page, base, logger);
+      const saved = await downloadCurrentView(page, base, targetSide, logger);
       for (const f of saved) {
         const bn = path.basename(f);
         if (!seenBasenames.has(bn)) { seenBasenames.add(bn); downloadedFiles.push(f); }
