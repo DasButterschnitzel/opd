@@ -425,6 +425,103 @@ async function findDreieichAnywhere(page, logger) {
 }
 
 // ---------------------------------------------------------------------------
+// Collect EVERY section entry whose name contains "Dreieich" as a whole word.
+// Returns a deduplicated, score-sorted list [{ text, score }] so that both the
+// pure "Dreieich" page (100) and Kombiseiten like "Langen/Egelsbach/Dreieich"
+// (80) are downloaded. On combo-only days the combo entry is still captured.
+// ---------------------------------------------------------------------------
+async function collectDreieichSections(page) {
+  const itemSel = 'a,button,li,[role="button"],[role="menuitem"],[role="option"],' +
+                  '[class*="item"],[class*="chapter"],[class*="toc"]';
+  const loc = page.locator(itemSel);
+  const cnt = await loc.count().catch(() => 0);
+  const seen = new Set();
+  const sections = [];
+  for (let i = 0; i < cnt && i < 400; i++) {
+    const el = loc.nth(i);
+    let text = '';
+    try {
+      if (!(await el.isVisible().catch(() => false))) continue;
+      text = ((await el.textContent().catch(() => '')) || '').trim().replace(/\s+/g, ' ');
+    } catch { continue; }
+    if (!text || text.length > 60) continue;
+    const score = scoreDreieich(text);
+    if (score > 0 && !seen.has(text)) {
+      seen.add(text);
+      sections.push({ text, score });
+    }
+  }
+  sections.sort((a, b) => b.score - a.score);
+  return sections;
+}
+
+// ---------------------------------------------------------------------------
+// Open a named section from the Inhalt menu. Re-opens the Inhalt panel first if
+// the entry isn't currently visible (the panel closes after navigating).
+// ---------------------------------------------------------------------------
+async function openInhaltSection(page, text, logger) {
+  const exact = () => page.getByText(text, { exact: true }).first();
+  if (!(await exact().isVisible().catch(() => false))) {
+    await clickReaderButton(page, 'Inhalt', logger, { optional: true });
+    await page.waitForTimeout(1000);
+  }
+  if (await exact().isVisible().catch(() => false)) {
+    await exact().click({ timeout: 5000 });
+    return true;
+  }
+  const loose = page.getByText(text, { exact: false }).first();
+  if (await loose.isVisible().catch(() => false)) {
+    await loose.click({ timeout: 5000 });
+    return true;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Download whatever is currently displayed in the reader.
+//   Strategy 1: toolbar "Download" fires a direct download -> save as baseFile.
+//   Strategy 2: a dialog/menu opens (e.g. Linke/Rechte Seite) -> download each
+//               offered option, suffixing the filename.
+// Returns the list of saved file paths.
+// ---------------------------------------------------------------------------
+async function downloadCurrentView(page, baseFile, logger) {
+  const saved = [];
+  try {
+    const [dl] = await Promise.all([
+      page.waitForEvent('download', { timeout: 15_000 }),
+      clickReaderButton(page, 'Download', logger),
+    ]);
+    await dl.saveAs(baseFile);
+    verifyPdfIntegrity(baseFile);
+    saved.push(baseFile);
+    logger.info('Gespeichert: ' + path.basename(baseFile));
+    return saved;
+  } catch (e) {
+    logger.warn('Kein direkter Download: ' + e.message);
+  }
+
+  await dumpClickables(page, logger, 'Download-Dialog');
+  const options = await getDropdownOptions(page, logger);
+  const stem = baseFile.replace(/\.pdf$/i, '');
+  for (const optText of options) {
+    const f = stem + '_' + toSafeFilename(optText) + '.pdf';
+    try {
+      const [dl] = await Promise.all([
+        page.waitForEvent('download', { timeout: 30_000 }),
+        page.getByText(optText, { exact: false }).first().click({ timeout: 5000 }),
+      ]);
+      await dl.saveAs(f);
+      verifyPdfIntegrity(f);
+      saved.push(f);
+      logger.info('Gespeichert: ' + path.basename(f));
+    } catch (e2) {
+      logger.warn('Option "' + optText + '" nicht ladbar: ' + e2.message);
+    }
+  }
+  return saved;
+}
+
+// ---------------------------------------------------------------------------
 // Test login only (no download) – used by the GUI "Zugangsdaten testen" button
 // ---------------------------------------------------------------------------
 async function testLogin(config, logger) {
@@ -730,73 +827,57 @@ async function runDownload(config, logger, abortSignal, options = {}) {
     }
 
     // We are now inside the reader of the Offenbach-Post edition. The Dreieich
-    // local section is reached via the "Inhalt" (table of contents) menu.
+    // local content is reached via the "Inhalt" (table of contents) menu and may
+    // appear BOTH as a pure "Dreieich" page AND on a Kombiseite (e.g.
+    // "Langen/Egelsbach/Dreieich"). We therefore load EVERY entry whose name
+    // contains "Dreieich" as a whole word.
     await page.waitForTimeout(1500);
 
     // ------------------------------------------------------------------
-    // 4) DREIEICH ÜBER INHALT-MENÜ FINDEN
+    // 4) ALLE DREIEICH-SEKTIONEN (inkl. Kombiseiten) ÜBER INHALT FINDEN
     // ------------------------------------------------------------------
-    logger.info('[5/6] Dreieich über Inhalt-Menü finden');
+    logger.info('[5/6] Dreieich-Sektion(en) über Inhalt finden');
     await dumpClickables(page, logger, 'Reader-Toolbar');
+    await clickReaderButton(page, 'Inhalt', logger);
+    await page.waitForTimeout(1200);
+    await dumpClickables(page, logger, 'Inhalt-Menü');
 
-    await withRetry(async () => {
-      await clickReaderButton(page, 'Inhalt', logger);
-      await page.waitForTimeout(1200);
-      await dumpClickables(page, logger, 'Inhalt-Menü');
-      const dreieichEntry = await findDreieichAnywhere(page, logger);
-      await dreieichEntry.click({ timeout: 5000 });
-    }, { retries: 1, baseDelayMs: 2000, label: 'Dreieich im Inhalt finden', logger, abortSignal });
-
-    await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
-    await page.waitForTimeout(1000);
-    logger.info('Dreieich-Sektion geöffnet.');
-
-    // ------------------------------------------------------------------
-    // 5+6) DREIEICH HERUNTERLADEN
-    // ------------------------------------------------------------------
-    logger.info('[6/6] Dreieich herunterladen');
-    await dumpClickables(page, logger, 'vor-Download');
-
-    const downloadedFiles = [];
-    const outFile = path.join(outputDir, `Dreieich_${today}.pdf`);
-
-    // Strategy 1: the reader-toolbar "Download" button may fire a direct
-    // download (whole current section) – try that first.
-    let directOk = false;
-    try {
-      const [dl] = await Promise.all([
-        page.waitForEvent('download', { timeout: 15_000 }),
-        clickReaderButton(page, 'Download', logger),
-      ]);
-      await dl.saveAs(outFile);
-      verifyPdfIntegrity(outFile);
-      downloadedFiles.push(outFile);
-      logger.info('Gespeichert: ' + path.basename(outFile));
-      directOk = true;
-    } catch (e) {
-      logger.warn('Kein direkter Download nach "Download"-Klick: ' + e.message);
+    const sections = await collectDreieichSections(page);
+    if (sections.length === 0) {
+      throw new Error(
+        'Keine Dreieich-Sektion im Inhalt gefunden. Bitte Protokoll ("Inhalt-Menü") und ' +
+        'Screenshot prüfen – möglicherweise Feiertag oder Sonderedition.'
+      );
+    }
+    logger.info('Dreieich-relevante Sektionen: ' +
+      sections.map(s => '"' + s.text + '" (' + s.score + ')').join(' | '));
+    const combos = sections.filter(s => s.score < 100);
+    if (combos.length) {
+      logger.warn('Kombiseite(n) erkannt: ' + combos.map(s => '"' + s.text + '"').join(', '));
     }
 
-    // Strategy 2: a menu/dialog opened instead (e.g. Linke/Rechte Seite,
-    // ganze Ausgabe …). Enumerate the offered options and download each.
-    if (!directOk) {
-      await dumpClickables(page, logger, 'Download-Dialog');
-      const options = await getDropdownOptions(page, logger);
-      for (const optText of options) {
-        const safeSuffix = toSafeFilename(optText);
-        const f = path.join(outputDir, `Dreieich_${today}_${safeSuffix}.pdf`);
-        try {
-          const [dl] = await Promise.all([
-            page.waitForEvent('download', { timeout: 30_000 }),
-            page.getByText(optText, { exact: false }).first().click({ timeout: 5000 }),
-          ]);
-          await dl.saveAs(f);
-          verifyPdfIntegrity(f);
-          downloadedFiles.push(f);
-          logger.info('Gespeichert: ' + path.basename(f));
-        } catch (e2) {
-          logger.warn('Option "' + optText + '" nicht ladbar: ' + e2.message);
-        }
+    // ------------------------------------------------------------------
+    // 5+6) JEDE DREIEICH-SEKTION ÖFFNEN UND HERUNTERLADEN
+    // ------------------------------------------------------------------
+    logger.info('[6/6] Dreieich-Sektion(en) herunterladen');
+    const downloadedFiles = [];
+    const seenBasenames = new Set();
+    for (const sec of sections) {
+      logger.info('Öffne Sektion: "' + sec.text + '"');
+      const opened = await openInhaltSection(page, sec.text, logger);
+      if (!opened) {
+        logger.warn('Sektion "' + sec.text + '" nicht anklickbar – übersprungen.');
+        continue;
+      }
+      await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+      await page.waitForTimeout(1000);
+      await dumpClickables(page, logger, 'vor-Download');
+
+      const base = path.join(outputDir, `Dreieich_${today}_${toSafeFilename(sec.text)}.pdf`);
+      const saved = await downloadCurrentView(page, base, logger);
+      for (const f of saved) {
+        const bn = path.basename(f);
+        if (!seenBasenames.has(bn)) { seenBasenames.add(bn); downloadedFiles.push(f); }
       }
     }
 
