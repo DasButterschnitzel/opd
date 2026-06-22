@@ -21,6 +21,8 @@ const DEFAULTS = {
   // --- Rückwirkendes Laden ---
   skipSundays: true,          // Sonntags erscheint i.d.R. keine Ausgabe
   catchUpDays: 7,             // wie viele Tage rückwirkend auf Lücken geprüft wird
+  // --- Vision API ---
+  anthropicApiKey: '',        // optionaler Anthropic API Key für Vision-Seitenerkennung
 };
 
 async function loadConfig() {

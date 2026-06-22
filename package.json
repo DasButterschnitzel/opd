@@ -9,6 +9,7 @@
     "dist:win": "electron-builder --win --x64"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.105.0",
     "playwright-core": "1.49.1"
   },
   "devDependencies": {
@@ -21,7 +22,12 @@
     "icon": "assets/icon.ico",
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "icon": "assets/icon.ico"
     },

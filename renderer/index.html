@@ -153,6 +153,18 @@
         </fieldset>
 
         <fieldset>
+          <legend>Vision-Seitenerkennung (optional)</legend>
+          <div class="field">
+            <label for="inp-apikey">Anthropic API Key</label>
+            <input id="inp-apikey" type="password" name="anthropicApiKey" autocomplete="off" placeholder="sk-ant-…" />
+            <small>
+              <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path></svg>
+              Optional. Wenn angegeben, wird bei unklarer Seitenzuordnung ein Screenshot analysiert (~0,001 € pro Analyse).
+            </small>
+          </div>
+        </fieldset>
+
+        <fieldset>
           <legend>Zielordner</legend>
           <div class="field field-row">
             <input id="inp-dir" type="text" name="outputDir" readonly />

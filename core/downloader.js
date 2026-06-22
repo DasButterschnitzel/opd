@@ -355,6 +355,47 @@ async function findDreieichSection(page, logger) {
 }
 
 // ---------------------------------------------------------------------------
+// Vision fallback: take a screenshot of the current spread and ask Claude
+// which side shows "Dreieich" as a section header.
+// Returns 'Linke Seite', 'Rechte Seite', or null on failure/uncertainty.
+// Saves a debug PNG to screenshotPath if provided.
+// ---------------------------------------------------------------------------
+async function analyzeSpreadForDreieich(page, logger, apiKey, screenshotPath) {
+  const buf = await page.screenshot({ fullPage: false });
+  if (screenshotPath) {
+    try { fs.writeFileSync(screenshotPath, buf); } catch {}
+  }
+  const { default: Anthropic } = require('@anthropic-ai/sdk');
+  const client = new Anthropic({ apiKey });
+  const resp = await client.messages.create({
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 50,
+    messages: [{
+      role: 'user',
+      content: [
+        {
+          type: 'image',
+          source: { type: 'base64', media_type: 'image/png', data: buf.toString('base64') },
+        },
+        {
+          type: 'text',
+          text: 'Du siehst den rebrush ePaper-Reader mit einer Zeitungs-Doppelseite. ' +
+            'Links ist die linke Seite, rechts die rechte Seite.\n\n' +
+            'Auf welcher Seite erscheint "Dreieich" als Sektionsüberschrift oder Seitenheader?\n\n' +
+            'Antworte NUR mit einem dieser Wörter: "Linke Seite", "Rechte Seite" oder "Unbekannt".',
+        },
+      ],
+    }],
+  });
+  const text = ((resp.content[0] && resp.content[0].text) || '').trim();
+  const lower = text.toLowerCase();
+  if (lower.includes('linke')) return 'Linke Seite';
+  if (lower.includes('rechte')) return 'Rechte Seite';
+  logger.warn('Vision: unklare Antwort: "' + text + '"');
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Poll the page URL concurrently with an Inhalt navigation click, trying to
 // capture the transient single-page URL (#/ID/30) before the reader switches
 // to the spread view (#/ID/30-31).
@@ -1144,6 +1185,40 @@ async function downloadDateInSession(page, kioskUrl, config, dateStr, logger, ab
     const tag = sec.score > 0 ? '' : ' (Nachbar)';
     logger.info('Sektion "' + sec.text + '"' + tag + ' → Spread ' + (sec.range || '?') +
       (sec.currentPage != null ? ', Seite ' + sec.currentPage : ''));
+  }
+
+  // Vision fallback (Level 3): for Dreieich sections still lacking currentPage
+  // after URL-interception + neighbor probe, take a screenshot and ask Claude.
+  const apiKey = config.anthropicApiKey || process.env.ANTHROPIC_API_KEY || '';
+  const needsVision = probe.filter(s => s.score > 0 && !s.skip && s.currentPage == null);
+  if (needsVision.length > 0 && apiKey) {
+    const visionDir = path.join(outputDir, 'debug');
+    fs.mkdirSync(visionDir, { recursive: true });
+    for (const sec of needsVision) {
+      const navOk = await openInhaltSection(page, sec.text, logger);
+      if (!navOk) continue;
+      await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+      await page.waitForTimeout(800);
+      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const shotPath = path.join(visionDir, 'vision-' + dateStr + '-' + ts + '.png');
+      try {
+        const side = await analyzeSpreadForDreieich(page, logger, apiKey, shotPath);
+        if (side) {
+          const parts = (sec.range || '').split('-').map(Number).filter(n => !isNaN(n));
+          if (parts.length === 2) {
+            sec.currentPage = side === 'Linke Seite' ? parts[0] : parts[1];
+          }
+          logger.info('Vision: "' + sec.text + '" auf ' + side + ' erkannt → Seite ' + sec.currentPage);
+        } else {
+          logger.warn('Vision: keine eindeutige Seite erkannt für "' + sec.text + '"');
+        }
+      } catch (e) {
+        logger.warn('Vision-Analyse fehlgeschlagen (' + e.message + ') – Heuristik greift.');
+      }
+    }
+  } else if (needsVision.length > 0 && !apiKey) {
+    logger.info('Kein Anthropic API Key → Vision-Fallback inaktiv. ' +
+      needsVision.map(s => '"' + s.text + '"').join(', ') + ' nutzt Heuristik.');
   }
 
   assignSides(probe.filter(s => !s.skip), logger);
