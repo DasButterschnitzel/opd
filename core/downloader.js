@@ -355,6 +355,45 @@ async function findDreieichSection(page, logger) {
 }
 
 // ---------------------------------------------------------------------------
+// Poll the page URL concurrently with an Inhalt navigation click, trying to
+// capture the transient single-page URL (#/ID/30) before the reader switches
+// to the spread view (#/ID/30-31).
+//
+// Usage:
+//   const handle = { active: true, result: null };
+//   const done   = capturePageFromUrl(page, handle, 3000);
+//   await openInhaltSection(page, text, logger);    // click happens here
+//   await page.waitForLoadState('networkidle', ...);
+//   handle.active = false;
+//   await done;
+//   const exactPage = handle.result; // number, or null if not found
+// ---------------------------------------------------------------------------
+function capturePageFromUrl(page, handle, maxMs = 3000) {
+  return (async () => {
+    const seen = new Set([page.url()]);
+    const deadline = Date.now() + maxMs;
+    while (handle.active && Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 20));
+      const url = page.url();
+      if (!seen.has(url)) {
+        seen.add(url);
+        // Look only at the last segment of the hash path, e.g. "#/903932/30"
+        const hashPart = url.includes('#') ? url.split('#')[1] : '';
+        const lastSeg = hashPart.split('/').filter(Boolean).pop() || '';
+        if (/^\d+$/.test(lastSeg)) {
+          const n = parseInt(lastSeg, 10);
+          // 2–999: plausible newspaper page; edition IDs are typically 6 digits
+          if (n >= 2 && n <= 999) {
+            handle.result = n;
+            return;
+          }
+        }
+      }
+    }
+  })();
+}
+
+// ---------------------------------------------------------------------------
 // Click a reader-toolbar/menu button identified by visible text, aria-label or
 // title. Returns true on success. Used for "Inhalt", "Download", etc.
 // ---------------------------------------------------------------------------
@@ -614,10 +653,15 @@ function assignSides(sections, logger) {
         s.side = 'Linke Seite';
         logger.info('Solo "' + s.text + '": Einzelseite → Linke Seite');
       } else {
-        // Cannot determine reliably – log warning and use score heuristic
-        s.side = s.score === 100 ? 'Rechte Seite' : 'Linke Seite';
-        logger.warn('Solo "' + s.text + '": Seite nicht eindeutig bestimmbar ' +
-          '(Spread ' + (s.range || '?') + ') – Heuristik: ' + s.side);
+        // Cannot determine reliably – log a prominent warning and default to
+        // Linke Seite (statistically more common: local sections typically
+        // start on an even/left page). User should check the screenshot.
+        s.side = 'Linke Seite';
+        logger.warn(
+          'Solo "' + s.text + '": Seite nicht bestimmbar ' +
+          '(Spread ' + (s.range || '?') + ', keine URL-Seiteninfo, kein Spread-Nachbar). ' +
+          'Annahme: Linke Seite – bitte Debug-Screenshot prüfen.'
+        );
       }
     } else {
       // Multiple sections: menu order = page order (first=links, last=rechts)
@@ -846,12 +890,308 @@ function rotateScreenshots(screenshotDir, keep = 10) {
 }
 
 // ---------------------------------------------------------------------------
+// Log in to the portal, navigate to the Offenbach-Post kiosk overview, and
+// return the kiosk URL. Guarantees the page is on the kiosk (not the reader)
+// when it returns – even if clicking the nav link would go straight to the
+// current edition. Shared by runDownload and runCatchUpBatch so they can
+// reuse a single browser session across multiple dates.
+// ---------------------------------------------------------------------------
+async function loginAndGetKiosk(page, config, logger, abortSignal) {
+  const { username, password } = config;
+
+  logger.info('[2/6] Portal laden');
+  await withRetry(
+    () => page.goto(PORTAL, { waitUntil: 'domcontentloaded', timeout: 30_000 }),
+    { retries: 2, baseDelayMs: 2000, label: 'Portal laden', logger, abortSignal }
+  );
+
+  logger.info('[3/6] Login durchführen');
+  await page.getByRole('link', { name: /Anmelden/ }).first().click();
+  await page.waitForLoadState('domcontentloaded', { timeout: 15_000 });
+
+  logger.info('Fuelle Login-Formular');
+  await page.getByPlaceholder('E-Mail').fill(username);
+  await page.getByPlaceholder('Passwort').fill(password);
+  await page.getByRole('button', { name: 'Anmelden' }).click();
+  await withRetry(
+    () => page.waitForLoadState('networkidle', { timeout: 30_000 }),
+    { retries: 2, baseDelayMs: 2000, label: 'Login-Laden', logger, abortSignal }
+  );
+
+  await page.getByRole('link', { name: /mit Anmeldung fortfahren/i })
+    .click({ timeout: 5_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+
+  const errorLoc = page.locator('[role="alert"], [class*="error"], [class*="alert"]')
+    .or(page.getByText(/ungueltig|falsch|incorrect|invalid|fehlgeschlagen/i));
+  const hasLoginError = await errorLoc.first().isVisible({ timeout: 3_000 }).catch(() => false);
+  if (hasLoginError) {
+    const errText = ((await errorLoc.first().textContent().catch(() => '')) || '').trim();
+    throw new Error('Login fehlgeschlagen: ' + (errText || 'Zugangsdaten pruefen.'));
+  }
+  logger.info('Login erfolgreich');
+
+  logger.info('[4/6] Ausgabe wählen');
+
+  // Capture the kiosk href before clicking so we can navigate back to it later
+  const opLink = page.getByRole('link', { name: /Offenbach-Post/ }).first();
+  const linkHref = await opLink.getAttribute('href', { timeout: 10_000 }).catch(() => null);
+
+  await opLink.click({ timeout: 20_000 });
+  await page.waitForLoadState('networkidle', { timeout: 30_000 });
+
+  // If the link went directly into the reader (today's edition auto-loaded),
+  // navigate back to the kiosk overview so that date selection can happen.
+  const deptCtrl = page.locator('rebrush-department-list-control');
+  const inReader = await deptCtrl.count({ timeout: 2000 }).catch(() => 0) > 0;
+
+  if (inReader) {
+    logger.info('Direkt in Reader gelandet – navigiere zurück zur Kiosk-Übersicht');
+    if (linkHref) {
+      const kioskUrl = linkHref.startsWith('http')
+        ? linkHref
+        : new URL(linkHref, PORTAL).toString();
+      try {
+        await page.goto(kioskUrl, { waitUntil: 'networkidle', timeout: 30_000 });
+        logger.info('Kiosk-URL: ' + kioskUrl);
+        return { kioskUrl };
+      } catch {}
+    }
+    // Fallback: browser history back
+    await page.goBack({ timeout: 15_000 }).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+  }
+
+  const kioskUrl = page.url();
+  logger.info('Kiosk-URL: ' + kioskUrl);
+  return { kioskUrl };
+}
+
+// ---------------------------------------------------------------------------
+// Core per-date download logic. Must be called after loginAndGetKiosk() has
+// placed the page on the kiosk overview. Handles:
+//   - navigating back to kioskUrl between batch dates
+//   - archive-date selection on kiosk
+//   - entering the reader
+//   - Inhalt probe with concurrent URL interception (smart side detection)
+//   - download + PDF integrity verification
+// Returns { skipped, files }. Does NOT close the browser (caller owns it).
+// ---------------------------------------------------------------------------
+async function downloadDateInSession(page, kioskUrl, config, dateStr, logger, abortSignal) {
+  const { outputDir } = config;
+  const isToday = formatDate() === dateStr;
+  const screenshotDir = path.join(outputDir, 'debug');
+
+  // Idempotency per date: skip if all valid files already exist
+  try {
+    const existing = fs.existsSync(outputDir)
+      ? fs.readdirSync(outputDir).filter(f => f.startsWith('Dreieich_' + dateStr) && f.endsWith('.pdf'))
+      : [];
+    if (existing.length > 0) {
+      const allValid = existing.every(f => {
+        try { verifyPdfIntegrity(path.join(outputDir, f)); return true; } catch { return false; }
+      });
+      if (allValid) {
+        logger.info('Bereits heruntergeladen (' + dateStr + '): ' + existing.join(', '));
+        return { skipped: true, files: existing };
+      }
+      logger.warn('Korrupter/unvollständiger vorheriger Download für ' + dateStr + ' – lade erneut.');
+    }
+  } catch {}
+
+  fs.mkdirSync(outputDir, { recursive: true });
+
+  // If a previous date's download left us inside the reader, navigate back to kiosk
+  const deptCtrl = page.locator('rebrush-department-list-control');
+  const currentlyInReader = await deptCtrl.count({ timeout: 800 }).catch(() => 0) > 0;
+  if (currentlyInReader) {
+    logger.info('Navigiere zur Kiosk-Übersicht für ' + dateStr + '...');
+    await page.goto(kioskUrl, { waitUntil: 'networkidle', timeout: 30_000 });
+  }
+
+  // ------------------------------------------------------------------
+  // KIOSK: select archive date (if needed) then click cover to enter reader
+  // ------------------------------------------------------------------
+  logger.info('[4/6] Ausgabe öffnen (' + (isToday ? 'heute' : dateStr) + ')');
+  const alreadyInReader = await deptCtrl.count({ timeout: 1500 }).catch(() => 0) > 0;
+  if (!alreadyInReader) {
+    const label = isToday ? 'aktuelle Ausgabe' : 'Archiv-Ausgabe ' + dateStr;
+    logger.info('Kiosk-Übersicht erkannt – öffne ' + label + '...');
+
+    if (!isToday) {
+      await selectArchiveDateOnKiosk(page, dateStr, logger);
+      await page.waitForTimeout(800);
+    }
+
+    const kiosk_strategies = [
+      'rebrush-kiosk-item a',
+      'rebrush-kiosk-item img',
+      'rebrush-kiosk-item',
+      '[class*="kiosk-item"] a',
+      '[class*="kiosk-item"] img',
+      '[class*="edition-item"] a',
+      '[class*="edition-item"] img',
+      '[class*="publication-item"] a',
+      '[class*="cover"] a',
+      '[class*="cover"] img',
+      'article a img',
+      'main a img',
+    ];
+    let opened = false;
+    for (const sel of kiosk_strategies) {
+      try {
+        const loc = page.locator(sel).first();
+        if (await loc.count({ timeout: 800 }).catch(() => 0) > 0) {
+          await loc.click({ timeout: 5000 });
+          await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+          if (await deptCtrl.count({ timeout: 3000 }).catch(() => 0) > 0) {
+            logger.info('Ausgabe geöffnet via "' + sel + '"');
+            opened = true;
+            break;
+          }
+        }
+      } catch {}
+    }
+    if (!opened) {
+      try {
+        await page.locator('img').first().click({ timeout: 5000 });
+        await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+        if (await deptCtrl.count({ timeout: 3000 }).catch(() => 0) > 0) {
+          logger.info('Ausgabe geöffnet via erstes Bild auf der Seite');
+          opened = true;
+        }
+      } catch {}
+    }
+    if (!opened) {
+      throw new Error(
+        'Kiosk: Ausgabe konnte nicht geöffnet werden – kein Weg in den Reader gefunden. ' +
+        'Bitte Debug-Screenshot prüfen.'
+      );
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // READER: find all Dreieich sections (incl. Kombiseiten) via Inhalt menu
+  // ------------------------------------------------------------------
+  await page.waitForTimeout(1500);
+
+  logger.info('[5/6] Dreieich-Sektion(en) über Inhalt finden');
+  await dumpClickables(page, logger, 'Reader-Toolbar');
+  await clickReaderButton(page, 'Inhalt', logger);
+  await page.waitForTimeout(1200);
+  await dumpClickables(page, logger, 'Inhalt-Menü');
+
+  const allSections = await collectAllSections(page);
+  const sections = allSections.filter(s => s.score > 0);
+  if (sections.length === 0) {
+    throw new Error(
+      'Keine Dreieich-Sektion im Inhalt gefunden. Bitte Protokoll ("Inhalt-Menü") und ' +
+      'Screenshot prüfen – möglicherweise Feiertag oder Sonderedition.'
+    );
+  }
+  logger.info('Dreieich-relevante Sektionen: ' +
+    sections.map(s => '"' + s.text + '" (' + s.score + ')').join(' | '));
+  const combos = sections.filter(s => s.score < 100);
+  if (combos.length) {
+    logger.warn('Kombiseite(n) erkannt: ' + combos.map(s => '"' + s.text + '"').join(', '));
+  }
+
+  // ------------------------------------------------------------------
+  // PROBE: navigate each Dreieich section + its direct menu neighbours to
+  // determine which spread it falls on and its left/right position.
+  // Concurrent URL interception captures the transient single-page URL
+  // (#/ID/30) before the reader switches to spread view (#/ID/30-31) –
+  // this is the most reliable source of exact page position.
+  // Example 15.06: Dreieich (S.28) + Neu-Isenburg (S.29) → both on spread
+  // 30-31 → Dreieich earlier in menu → Linke Seite.
+  // ------------------------------------------------------------------
+  logger.info('[6/6] Seiten zuordnen & herunterladen');
+  const probeOrders = new Set();
+  for (const s of sections) {
+    probeOrders.add(s.order);
+    if (s.order > 0) probeOrders.add(s.order - 1);
+    if (s.order < allSections.length - 1) probeOrders.add(s.order + 1);
+  }
+  const probe = allSections
+    .filter(s => probeOrders.has(s.order))
+    .sort((a, b) => a.order - b.order);
+
+  for (const sec of probe) {
+    // Start URL polling BEFORE the click to catch the transient single-page URL
+    const pollHandle = { active: true, result: null };
+    const pollDone = capturePageFromUrl(page, pollHandle, 3000);
+
+    const secOpened = await openInhaltSection(page, sec.text, logger);
+    if (!secOpened) {
+      pollHandle.active = false;
+      await pollDone;
+      logger.warn('Sektion "' + sec.text + '" nicht anklickbar – übersprungen.');
+      sec.skip = true;
+      continue;
+    }
+    await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+    await page.waitForTimeout(1000);
+    pollHandle.active = false;
+    await pollDone;
+
+    const pos = await getPagePosition(page);
+    sec.range = pos.spread;
+    // URL-captured single page takes priority over "X von Y" (always null in practice)
+    sec.currentPage = pollHandle.result ?? pos.currentPage;
+    if (pollHandle.result != null) {
+      logger.info('Sektion "' + sec.text + '" – Seite via URL erfasst: ' + pollHandle.result);
+    }
+    const tag = sec.score > 0 ? '' : ' (Nachbar)';
+    logger.info('Sektion "' + sec.text + '"' + tag + ' → Spread ' + (sec.range || '?') +
+      (sec.currentPage != null ? ', Seite ' + sec.currentPage : ''));
+  }
+
+  assignSides(probe.filter(s => !s.skip), logger);
+  const active = probe.filter(s => !s.skip && s.score > 0);
+
+  // ------------------------------------------------------------------
+  // DOWNLOAD
+  // ------------------------------------------------------------------
+  const downloadedFiles = [];
+  const seenSpreadSide = new Set();
+  for (const sec of active) {
+    const key = (sec.range || sec.text) + '|' + sec.side;
+    if (seenSpreadSide.has(key)) {
+      logger.info('Überspringe Duplikat: "' + sec.text + '" (' + sec.side + ' auf Spread ' + sec.range + ' bereits geladen)');
+      continue;
+    }
+    logger.info('Öffne Sektion: "' + sec.text + '" (' + sec.side + ')');
+    const secOpened = await openInhaltSection(page, sec.text, logger);
+    if (!secOpened) { logger.warn('Sektion "' + sec.text + '" nicht anklickbar – übersprungen.'); continue; }
+    await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+    await page.waitForTimeout(1000);
+
+    const outFile = path.join(outputDir, 'Dreieich_' + dateStr + '_' + toSafeFilename(sec.text) + '.pdf');
+    const ok = await downloadSide(page, sec.side, outFile, logger);
+    if (ok) {
+      seenSpreadSide.add(key);
+      downloadedFiles.push(outFile);
+    }
+  }
+
+  if (downloadedFiles.length === 0) {
+    throw new Error(
+      'Kein Download ausgelöst. Bitte Protokoll und Screenshot prüfen – ' +
+      'die Toolbar- bzw. Inhalt-Struktur muss noch feinjustiert werden.'
+    );
+  }
+
+  logger.info('Fertig (' + dateStr + '). ' + downloadedFiles.length + ' Datei(en) heruntergeladen.');
+  return { skipped: false, files: downloadedFiles.map(f => path.basename(f)), screenshotDir };
+}
+
+// ---------------------------------------------------------------------------
 // Main download function.
 //   options.targetDate – optional Date/string for catch-up of a past edition.
 //                        Defaults to today (current edition).
 // ---------------------------------------------------------------------------
 async function runDownload(config, logger, abortSignal, options = {}) {
-  const { username, password, outputDir } = config;
+  const { outputDir } = config;
   const targetDate = options.targetDate ? new Date(options.targetDate) : null;
   const today = formatDate(targetDate);
   const isToday = !targetDate || formatDate() === today;
@@ -860,10 +1200,12 @@ async function runDownload(config, logger, abortSignal, options = {}) {
   // ------------------------------------------------------------------
   // IDEMPOTENZ: Skip if today's files all exist and pass integrity check.
   // Partial or corrupt downloads fall through for re-download.
+  // (downloadDateInSession also checks per-date, but this early exit avoids
+  //  launching the browser at all when nothing is needed.)
   // ------------------------------------------------------------------
   try {
     const existing = fs.existsSync(outputDir)
-      ? fs.readdirSync(outputDir).filter(f => f.startsWith(`Dreieich_${today}`) && f.endsWith('.pdf'))
+      ? fs.readdirSync(outputDir).filter(f => f.startsWith('Dreieich_' + today) && f.endsWith('.pdf'))
       : [];
     if (existing.length > 0) {
       const allValid = existing.every(f => {
@@ -876,8 +1218,6 @@ async function runDownload(config, logger, abortSignal, options = {}) {
       logger.warn('Unvollstaendiger oder korrupter vorheriger Download – lade erneut herunter.');
     }
   } catch {}
-
-  fs.mkdirSync(outputDir, { recursive: true });
 
   logger.info('[1/6] Browser ermitteln...');
   const executablePath = getChromiumPath();
@@ -905,238 +1245,20 @@ async function runDownload(config, logger, abortSignal, options = {}) {
   const screenshotDir = path.join(outputDir, 'debug');
 
   try {
-    // ------------------------------------------------------------------
-    // 1) PORTAL
-    // ------------------------------------------------------------------
-    logger.info('[2/6] Portal laden');
-    await withRetry(
-      () => page.goto(PORTAL, { waitUntil: 'domcontentloaded', timeout: 30_000 }),
-      { retries: 2, baseDelayMs: 2000, label: 'Portal laden', logger, abortSignal }
-    );
+    const { kioskUrl } = await loginAndGetKiosk(page, config, logger, abortSignal);
+    const result = await downloadDateInSession(page, kioskUrl, config, today, logger, abortSignal);
 
-    // ------------------------------------------------------------------
-    // 2) LOGIN
-    // ------------------------------------------------------------------
-    logger.info('[3/6] Login durchführen');
-    await page.getByRole('link', { name: /Anmelden/ }).first().click();
-    await page.waitForLoadState('domcontentloaded', { timeout: 15_000 });
-
-    logger.info('Fuelle Login-Formular');
-    await page.getByPlaceholder('E-Mail').fill(username);
-    await page.getByPlaceholder('Passwort').fill(password);
-    await page.getByRole('button', { name: 'Anmelden' }).click();
-    await withRetry(
-      () => page.waitForLoadState('networkidle', { timeout: 30_000 }),
-      { retries: 2, baseDelayMs: 2000, label: 'Login-Laden', logger, abortSignal }
-    );
-
-    // Optionaler "mit Anmeldung fortfahren" Dialog
-    await page.getByRole('link', { name: /mit Anmeldung fortfahren/i })
-      .click({ timeout: 5_000 }).catch(() => {});
-    await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
-
-    const errorLoc = page.locator('[role="alert"], [class*="error"], [class*="alert"]')
-      .or(page.getByText(/ungueltig|falsch|incorrect|invalid|fehlgeschlagen/i));
-    const hasLoginError = await errorLoc.first().isVisible({ timeout: 3_000 }).catch(() => false);
-    if (hasLoginError) {
-      const errText = ((await errorLoc.first().textContent().catch(() => '')) || '').trim();
-      throw new Error('Login fehlgeschlagen: ' + (errText || 'Zugangsdaten pruefen.'));
-    }
-    logger.info('Login erfolgreich');
-
-    // ------------------------------------------------------------------
-    // 3) AKTUELLE AUSGABE
-    // ------------------------------------------------------------------
-    logger.info('[4/6] Ausgabe wählen');
-    await page.getByRole('link', { name: /Offenbach-Post/ }).first().click({ timeout: 20_000 });
-    await page.waitForLoadState('networkidle', { timeout: 30_000 });
-
-    // After clicking the nav link we may land on the kiosk overview (large
-    // edition thumbnail + "Erscheinungstag wählen" dropdown) rather than directly
-    // in the reader. For catch-up dates: select the archive date on the kiosk page
-    // FIRST, then click the edition thumbnail to enter the correct edition.
-    const deptCtrl = page.locator('rebrush-department-list-control');
-    const alreadyInReader = await deptCtrl.count({ timeout: 2000 }).catch(() => 0) > 0;
-    if (!alreadyInReader) {
-      const label = isToday ? 'aktuelle Ausgabe' : 'Archiv-Ausgabe ' + today;
-      logger.info('Kiosk-Übersicht erkannt – öffne ' + label + '...');
-
-      // For catch-up: select the past date BEFORE entering the reader
-      if (!isToday) {
-        await selectArchiveDateOnKiosk(page, today, logger);
-        await page.waitForTimeout(800);
-      }
-
-      const kiosk_strategies = [
-        'rebrush-kiosk-item a',
-        'rebrush-kiosk-item img',
-        'rebrush-kiosk-item',
-        '[class*="kiosk-item"] a',
-        '[class*="kiosk-item"] img',
-        '[class*="edition-item"] a',
-        '[class*="edition-item"] img',
-        '[class*="publication-item"] a',
-        '[class*="cover"] a',
-        '[class*="cover"] img',
-        'article a img',
-        'main a img',
-      ];
-      let opened = false;
-      for (const sel of kiosk_strategies) {
-        try {
-          const loc = page.locator(sel).first();
-          if (await loc.count({ timeout: 800 }).catch(() => 0) > 0) {
-            await loc.click({ timeout: 5000 });
-            await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
-            if (await deptCtrl.count({ timeout: 3000 }).catch(() => 0) > 0) {
-              logger.info('Ausgabe geöffnet via "' + sel + '"');
-              opened = true;
-              break;
-            }
-          }
-        } catch {}
-      }
-      if (!opened) {
-        // Final attempt: click the first large image on the page (edition cover)
-        try {
-          await page.locator('img').first().click({ timeout: 5000 });
-          await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
-          if (await deptCtrl.count({ timeout: 3000 }).catch(() => 0) > 0) {
-            logger.info('Ausgabe geöffnet via erstes Bild auf der Seite');
-            opened = true;
-          }
-        } catch {}
-      }
-      if (!opened) {
-        throw new Error(
-          'Kiosk: Ausgabe konnte nicht geöffnet werden – kein Weg in den Reader gefunden. ' +
-          'Bitte Debug-Screenshot prüfen.'
-        );
-      }
-    }
-
-    // We are now inside the reader of the Offenbach-Post edition. The Dreieich
-    // local content is reached via the "Inhalt" (table of contents) menu and may
-    // appear BOTH as a pure "Dreieich" page AND on a Kombiseite (e.g.
-    // "Langen/Egelsbach/Dreieich"). We therefore load EVERY entry whose name
-    // contains "Dreieich" as a whole word.
-    await page.waitForTimeout(1500);
-
-    // ------------------------------------------------------------------
-    // 4) ALLE DREIEICH-SEKTIONEN (inkl. Kombiseiten) ÜBER INHALT FINDEN
-    // ------------------------------------------------------------------
-    logger.info('[5/6] Dreieich-Sektion(en) über Inhalt finden');
-    await dumpClickables(page, logger, 'Reader-Toolbar');
-    await clickReaderButton(page, 'Inhalt', logger);
-    await page.waitForTimeout(1200);
-    await dumpClickables(page, logger, 'Inhalt-Menü');
-
-    const allSections = await collectAllSections(page);
-    const sections = allSections.filter(s => s.score > 0);
-    if (sections.length === 0) {
-      throw new Error(
-        'Keine Dreieich-Sektion im Inhalt gefunden. Bitte Protokoll ("Inhalt-Menü") und ' +
-        'Screenshot prüfen – möglicherweise Feiertag oder Sonderedition.'
-      );
-    }
-    logger.info('Dreieich-relevante Sektionen: ' +
-      sections.map(s => '"' + s.text + '" (' + s.score + ')').join(' | '));
-    const combos = sections.filter(s => s.score < 100);
-    if (combos.length) {
-      logger.warn('Kombiseite(n) erkannt: ' + combos.map(s => '"' + s.text + '"').join(', '));
-    }
-
-    // ------------------------------------------------------------------
-    // 5) PROBE-SET BILDEN, SPREAD-BEREICH ERMITTELN, SEITE ZUORDNEN
-    //    Dreieich liegt mal links, mal rechts auf seinem Zweiseitenblick und
-    //    der Seitenindikator im DOM ist unzuverlässig ("1 von 42"). Deshalb
-    //    prüfen wir zusätzlich die direkten Menü-NACHBARN jeder Dreieich-
-    //    Sektion: die Nachbarsektion, die sich denselben Spread teilt,
-    //    entscheidet per Menü-Reihenfolge über links/rechts (frühere
-    //    Menüposition = linke Seite).
-    //    Beispiel 15.06.: Dreieich (S.28) + Neu-Isenburg (S.29) auf Spread
-    //    30-31 → Dreieich steht im Menü davor → linke Seite.
-    // ------------------------------------------------------------------
-    logger.info('[6/6] Seiten zuordnen & herunterladen');
-    const probeOrders = new Set();
-    for (const s of sections) {
-      probeOrders.add(s.order);
-      if (s.order > 0) probeOrders.add(s.order - 1);
-      if (s.order < allSections.length - 1) probeOrders.add(s.order + 1);
-    }
-    const probe = allSections
-      .filter(s => probeOrders.has(s.order))
-      .sort((a, b) => a.order - b.order);
-
-    for (const sec of probe) {
-      const opened = await openInhaltSection(page, sec.text, logger);
-      if (!opened) {
-        logger.warn('Sektion "' + sec.text + '" nicht anklickbar – übersprungen.');
-        sec.skip = true;
-        continue;
-      }
-      await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
-      await page.waitForTimeout(1000);
-      const pos = await getPagePosition(page);
-      sec.range = pos.spread;
-      sec.currentPage = pos.currentPage;
-      const tag = sec.score > 0 ? '' : ' (Nachbar)';
-      logger.info('Sektion "' + sec.text + '"' + tag + ' → Spread ' + (sec.range || '?') +
-        (sec.currentPage != null ? ', Seite ' + sec.currentPage : ''));
-    }
-
-    // Seiten über das gesamte Probe-Set zuordnen (Nachbarn liefern die
-    // Spread-Partner), danach nur die Dreieich-Sektionen herunterladen.
-    assignSides(probe.filter(s => !s.skip), logger);
-    const active = probe.filter(s => !s.skip && s.score > 0);
-
-    // ------------------------------------------------------------------
-    // 6) GEZIELTEN SEITEN-DOWNLOAD AUSFÜHREN
-    // ------------------------------------------------------------------
-    const downloadedFiles = [];
-    const seenSpreadSide = new Set();   // dedupe: same spread+side only once
-    for (const sec of active) {
-      const key = (sec.range || sec.text) + '|' + sec.side;
-      if (seenSpreadSide.has(key)) {
-        logger.info('Überspringe Duplikat: "' + sec.text + '" (' + sec.side + ' auf Spread ' + sec.range + ' bereits geladen)');
-        continue;
-      }
-      logger.info('Öffne Sektion: "' + sec.text + '" (' + sec.side + ')');
-      const opened = await openInhaltSection(page, sec.text, logger);
-      if (!opened) { logger.warn('Sektion "' + sec.text + '" nicht anklickbar – übersprungen.'); continue; }
-      await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
-      await page.waitForTimeout(1000);
-
-      const outFile = path.join(outputDir, `Dreieich_${today}_${toSafeFilename(sec.text)}.pdf`);
-      const ok = await downloadSide(page, sec.side, outFile, logger);
-      if (ok) {
-        seenSpreadSide.add(key);
-        downloadedFiles.push(outFile);
-      }
-    }
-
-    if (downloadedFiles.length === 0) {
-      throw new Error(
-        'Kein Download ausgelöst. Bitte Protokoll und Screenshot prüfen – ' +
-        'die Toolbar- bzw. Inhalt-Struktur muss noch feinjustiert werden.'
-      );
-    }
-
-    logger.info('Fertig. ' + downloadedFiles.length + ' Datei(en) heruntergeladen.');
-
-    // lastSuccess nur beim regulären Heute-Lauf setzen, damit ein Aufhol-Lauf
-    // den Status des letzten Tageslaufs nicht überschreibt.
-    if (isToday) {
+    if (isToday && !result.skipped) {
       const cfg = await loadConfig();
       await saveConfig({ ...cfg, lastSuccess: new Date().toISOString() });
     }
 
-    return { skipped: false, files: downloadedFiles.map(f => path.basename(f)) };
+    return result;
 
   } catch (err) {
     try {
       fs.mkdirSync(screenshotDir, { recursive: true });
-      const screenshotPath = path.join(screenshotDir, `error-${today}-${Date.now()}.png`);
+      const screenshotPath = path.join(screenshotDir, 'error-' + today + '-' + Date.now() + '.png');
       await page.screenshot({ path: screenshotPath, fullPage: true });
       logger.error('Screenshot: ' + screenshotPath);
       rotateScreenshots(screenshotDir, 10);
@@ -1148,8 +1270,82 @@ async function runDownload(config, logger, abortSignal, options = {}) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Catch-up batch: download multiple past dates in a single browser session
+// (one login, one browser, N date iterations). Oldest dates first.
+// Returns [{ date, ok, files?, error? }].
+// ---------------------------------------------------------------------------
+async function runCatchUpBatch(config, logger, abortSignal, dates) {
+  if (!dates || dates.length === 0) return [];
+
+  const { outputDir } = config;
+
+  logger.info('[Aufholen] ' + dates.length + ' verpasste(r) Tag(e): ' + dates.join(', '));
+
+  const executablePath = getChromiumPath();
+  if (!executablePath) {
+    throw new Error(
+      'Kein Browser gefunden.\n' +
+      'Loesung A: setup.bat erneut ausfuehren.\n' +
+      'Loesung B: Google Chrome oder Microsoft Edge installieren.\n' +
+      'Loesung C: browser-path.txt anlegen mit dem Pfad zur chrome.exe.'
+    );
+  }
+  logger.info('Starte Browser: ' + executablePath);
+
+  const browser = await chromium.launch({ headless: true, executablePath });
+  const context = await browser.newContext({ acceptDownloads: true });
+  const page    = await context.newPage();
+
+  if (abortSignal) {
+    abortSignal.addEventListener('abort', async () => {
+      logger.warn('Aufholen abgebrochen.');
+      await browser.close().catch(() => {});
+    });
+  }
+
+  const results = [];
+  try {
+    const { kioskUrl } = await loginAndGetKiosk(page, config, logger, abortSignal);
+
+    for (const dateStr of dates) {
+      if (abortSignal?.aborted) break;
+      logger.info('━━━ Aufholen: ' + dateStr + ' ━━━');
+      try {
+        const r = await downloadDateInSession(page, kioskUrl, config, dateStr, logger, abortSignal);
+        results.push({ date: dateStr, ok: true, files: r.files, skipped: r.skipped });
+      } catch (err) {
+        logger.error('Fehler beim Nachladen ' + dateStr + ': ' + err.message);
+        results.push({ date: dateStr, ok: false, error: err.message });
+        // Save a debug screenshot and navigate back to kiosk for the next date
+        try {
+          const screenshotDir = path.join(outputDir, 'debug');
+          fs.mkdirSync(screenshotDir, { recursive: true });
+          const screenshotPath = path.join(screenshotDir, 'error-' + dateStr + '-' + Date.now() + '.png');
+          await page.screenshot({ path: screenshotPath, fullPage: true });
+          logger.error('Screenshot: ' + screenshotPath);
+          rotateScreenshots(screenshotDir, 10);
+        } catch {}
+        // Navigate back to kiosk so the next date can proceed
+        try {
+          await page.goto(kioskUrl, { waitUntil: 'networkidle', timeout: 30_000 });
+        } catch {}
+      }
+    }
+  } finally {
+    await browser.close().catch(() => {});
+  }
+
+  const ok  = results.filter(r => r.ok && !r.skipped).length;
+  const skp = results.filter(r => r.skipped).length;
+  const fail = results.filter(r => !r.ok).length;
+  logger.info('[Aufholen] Abgeschlossen: ' + ok + ' neu, ' + skp + ' übersprungen, ' + fail + ' fehlgeschlagen.');
+  return results;
+}
+
 module.exports = {
   runDownload,
+  runCatchUpBatch,
   getFilesForToday,
   testLogin,
   scoreDreieich,

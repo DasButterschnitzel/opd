@@ -297,29 +297,38 @@ document.getElementById('btn-catchup').addEventListener('click', async () => {
   liveLog.innerHTML = '';
   resultBanner.classList.add('hidden');
   progressWrap.classList.remove('hidden');
+  progressStep.textContent = missedDates.length + ' Tag(e) – einmalig anmelden…';
   setHeaderStatus('busy', 'Aufholen…');
 
   const unsubscribe = window.api.onDownloadLog(appendLog);
-  const ok = [], failed = [];
-  // Älteste zuerst nachladen
-  for (const date of [...missedDates].reverse()) {
-    progressStep.textContent = 'Lade nach: ' + new Date(date).toLocaleDateString('de-DE');
-    const res = await window.api.catchUpDownload(date);
-    if (res.ok) ok.push(date); else failed.push(date + ' (' + (res.error || 'Fehler') + ')');
-  }
+  // Oldest first; single browser session for all dates
+  const res = await window.api.catchUpBatch([...missedDates].reverse());
   unsubscribe();
 
   progressWrap.classList.add('hidden');
   btn.disabled = false;
   resultBanner.classList.remove('hidden', 'ok', 'err');
-  if (failed.length === 0) {
-    resultBanner.classList.add('ok');
-    resultBanner.textContent = '✓ ' + ok.length + ' Tag(e) nachgeladen.';
-    setHeaderStatus('ok', 'Fertig');
-  } else {
+
+  if (!res.ok) {
+    // Top-level failure (browser not found, login error, etc.)
     resultBanner.classList.add('err');
-    resultBanner.textContent = '✓ ' + ok.length + ' nachgeladen, ✗ ' + failed.length + ' fehlgeschlagen:\n' + failed.join('\n');
-    setHeaderStatus('error', 'Teilweise');
+    resultBanner.textContent = '✗ ' + (res.error || 'Unbekannter Fehler');
+    setHeaderStatus('error', 'Fehler');
+  } else {
+    const results  = res.results || [];
+    const ok       = results.filter(r => r.ok && !r.skipped).length;
+    const skipped  = results.filter(r => r.skipped).length;
+    const failed   = results.filter(r => !r.ok);
+    if (failed.length === 0) {
+      resultBanner.classList.add('ok');
+      resultBanner.textContent = '✓ ' + ok + ' Tag(e) nachgeladen' + (skipped ? ', ' + skipped + ' bereits vorhanden' : '') + '.';
+      setHeaderStatus('ok', 'Fertig');
+    } else {
+      resultBanner.classList.add('err');
+      const failList = failed.map(r => new Date(r.date).toLocaleDateString('de-DE') + ' (' + (r.error || 'Fehler') + ')').join('\n');
+      resultBanner.textContent = '✓ ' + ok + ' nachgeladen, ✗ ' + failed.length + ' fehlgeschlagen:\n' + failList;
+      setHeaderStatus('error', 'Teilweise');
+    }
   }
   await refreshStatus();
 });

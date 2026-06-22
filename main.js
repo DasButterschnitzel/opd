@@ -12,7 +12,7 @@ process.on('uncaughtException', (err) => {
 });
 
 const { loadConfig, saveConfig, recordRunResult } = require('./core/config');
-const { runDownload, getFilesForToday, testLogin, findMissedDates, getChromiumPath } = require('./core/downloader');
+const { runDownload, runCatchUpBatch, getFilesForToday, testLogin, findMissedDates, getChromiumPath } = require('./core/downloader');
 const { runSelfCheck } = require('./core/selfcheck');
 const { createLogger, getRecentLogs } = require('./core/logger');
 
@@ -334,6 +334,40 @@ ipcMain.handle('missed:get', async () => {
     return { dates };
   } catch (err) {
     return { dates: [], error: err.message };
+  }
+});
+
+// Batch catch-up: single browser session, one login, N dates
+ipcMain.handle('catchup:batch', async (event, dates) => {
+  if (!Array.isArray(dates) || dates.length === 0) return { ok: true, results: [] };
+
+  const logger = createLogger((line) => {
+    if (!event.sender.isDestroyed()) event.sender.send('download:log', line);
+  });
+
+  let config;
+  try {
+    config = await loadConfig();
+  } catch (err) {
+    return { ok: false, error: 'Konfiguration konnte nicht geladen werden: ' + err.message };
+  }
+
+  if (!config.username || !config.password) {
+    return { ok: false, error: 'Zugangsdaten fehlen. Bitte in den Einstellungen konfigurieren.' };
+  }
+
+  try {
+    activeDownloadAbort = new AbortController();
+    const results = await withWatchdog(
+      runCatchUpBatch(config, logger, activeDownloadAbort.signal, dates),
+      activeDownloadAbort,
+      dates.length * DOWNLOAD_WATCHDOG_MS  // scale watchdog with date count
+    );
+    activeDownloadAbort = null;
+    return { ok: true, results };
+  } catch (err) {
+    activeDownloadAbort = null;
+    return { ok: false, error: err.message };
   }
 });
 
