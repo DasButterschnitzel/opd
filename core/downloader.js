@@ -688,17 +688,20 @@ function assignSides(sections, logger) {
       if (s.currentPage != null && parts.length === 2) {
         // Reliable: compare navigated page to spread boundaries
         s.side = s.currentPage <= parts[0] ? 'Linke Seite' : 'Rechte Seite';
+        s.sideReliable = true;
         logger.info('Solo "' + s.text + '": Seite ' + s.currentPage +
           ' in Spread ' + s.range + ' → ' + s.side);
       } else if (parts.length === 1) {
         // Single-page spread (no right page)
         s.side = 'Linke Seite';
+        s.sideReliable = true;
         logger.info('Solo "' + s.text + '": Einzelseite → Linke Seite');
       } else {
         // Cannot determine reliably – log a prominent warning and default to
         // Linke Seite (statistically more common: local sections typically
         // start on an even/left page). User should check the screenshot.
         s.side = 'Linke Seite';
+        s.sideReliable = false;
         logger.warn(
           'Solo "' + s.text + '": Seite nicht bestimmbar ' +
           '(Spread ' + (s.range || '?') + ', keine URL-Seiteninfo, kein Spread-Nachbar). ' +
@@ -706,11 +709,13 @@ function assignSides(sections, logger) {
         );
       }
     } else {
-      // Multiple sections: menu order = page order (first=links, last=rechts)
+      // Multiple sections: menu order = page order (first=links, last=rechts).
+      // This is reliable — PDF-Verify must NOT override it.
       group.forEach((s, idx) => {
         s.side = idx === 0 ? 'Linke Seite'
                : idx === group.length - 1 ? 'Rechte Seite'
                : 'Linke Seite';
+        s.sideReliable = true;
       });
     }
     logger.info('Spread ' + range + ': ' +
@@ -1348,26 +1353,42 @@ async function downloadDateInSession(page, kioskUrl, config, dateStr, logger, ab
   const seenSpreadSide = new Set();
   const verifyCtx = { dateStr, outputDir, apiKey };
   for (const sec of active) {
-    logger.info('Öffne Sektion: "' + sec.text + '" (Annahme ' + sec.side + ')');
+    const secLabel = '"' + sec.text + '" (' + sec.side +
+      (sec.sideReliable ? ', zuverlässig' : ', Heuristik') + ')';
+    logger.info('Öffne Sektion: ' + secLabel);
     const secOpened = await openInhaltSection(page, sec.text, logger);
     if (!secOpened) { logger.warn('Sektion "' + sec.text + '" nicht anklickbar – übersprungen.'); continue; }
     await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
     await page.waitForTimeout(1000);
 
     const outFile = path.join(outputDir, 'Dreieich_' + dateStr + '_' + toSafeFilename(sec.text) + '.pdf');
-    const chosen = await downloadDreieichVerified(page, sec.side, outFile, logger, verifyCtx);
-    if (!chosen) continue;
 
-    // Dedupe on the VERIFIED side (not the heuristic guess) so two sections that
-    // resolve to the same physical page are not downloaded twice.
-    const key = (sec.range || sec.text) + '|' + chosen.side;
-    if (seenSpreadSide.has(key)) {
-      logger.info('Überspringe Duplikat: "' + sec.text + '" (' + chosen.side + ' auf Spread ' + sec.range + ' bereits geladen)');
-      try { fs.unlinkSync(outFile); } catch {}
-      continue;
+    if (sec.sideReliable) {
+      // Side was determined reliably (menu order or URL capture) – download
+      // directly without PDF-Verify, which could wrongly flip the side when
+      // multiple Dreieich sections share a spread (combo page wins on hit count).
+      const key = (sec.range || sec.text) + '|' + sec.side;
+      if (seenSpreadSide.has(key)) {
+        logger.info('Überspringe Duplikat: "' + sec.text + '" (' + sec.side + ' auf Spread ' + sec.range + ' bereits geladen)');
+        continue;
+      }
+      const ok = await downloadSide(page, sec.side, outFile, logger);
+      if (!ok) continue;
+      seenSpreadSide.add(key);
+      downloadedFiles.push(outFile);
+    } else {
+      // Heuristic side – verify by PDF content and self-correct if wrong.
+      const chosen = await downloadDreieichVerified(page, sec.side, outFile, logger, verifyCtx);
+      if (!chosen) continue;
+      const key = (sec.range || sec.text) + '|' + chosen.side;
+      if (seenSpreadSide.has(key)) {
+        logger.info('Überspringe Duplikat: "' + sec.text + '" (' + chosen.side + ' auf Spread ' + sec.range + ' bereits geladen)');
+        try { fs.unlinkSync(outFile); } catch {}
+        continue;
+      }
+      seenSpreadSide.add(key);
+      downloadedFiles.push(outFile);
     }
-    seenSpreadSide.add(key);
-    downloadedFiles.push(outFile);
   }
 
   if (downloadedFiles.length === 0) {
