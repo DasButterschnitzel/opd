@@ -126,11 +126,12 @@ async function refreshTodayFiles() {
 // --------------------------------------------------------------------------
 async function loadSettings() {
   const cfg = await window.api.getConfig();
-  document.getElementById('inp-user').value  = cfg.username || '';
-  document.getElementById('inp-pass').value  = cfg.password || '';
-  document.getElementById('inp-dir').value   = cfg.outputDir || '';
-  document.getElementById('inp-hour').value  = cfg.scheduleHour  ?? 6;
-  document.getElementById('inp-min').value   = cfg.scheduleMinute ?? 0;
+  document.getElementById('inp-user').value   = cfg.username || '';
+  document.getElementById('inp-pass').value   = cfg.password || '';
+  document.getElementById('inp-apikey').value = cfg.anthropicApiKey || '';
+  document.getElementById('inp-dir').value    = cfg.outputDir || '';
+  document.getElementById('inp-hour').value   = cfg.scheduleHour  ?? 6;
+  document.getElementById('inp-min').value    = cfg.scheduleMinute ?? 0;
   document.getElementById('inp-skip-sun').checked = cfg.skipSundays !== false;
 }
 
@@ -138,12 +139,13 @@ document.getElementById('settings-form').addEventListener('submit', async (e) =>
   e.preventDefault();
   const msg = document.getElementById('save-msg');
   const result = await window.api.saveConfig({
-    username:       document.getElementById('inp-user').value.trim(),
-    password:       document.getElementById('inp-pass').value,
-    outputDir:      document.getElementById('inp-dir').value,
-    scheduleHour:   parseInt(document.getElementById('inp-hour').value, 10),
-    scheduleMinute: parseInt(document.getElementById('inp-min').value, 10),
-    skipSundays:    document.getElementById('inp-skip-sun').checked,
+    username:         document.getElementById('inp-user').value.trim(),
+    password:         document.getElementById('inp-pass').value,
+    anthropicApiKey:  document.getElementById('inp-apikey').value.trim(),
+    outputDir:        document.getElementById('inp-dir').value,
+    scheduleHour:     parseInt(document.getElementById('inp-hour').value, 10),
+    scheduleMinute:   parseInt(document.getElementById('inp-min').value, 10),
+    skipSundays:      document.getElementById('inp-skip-sun').checked,
   });
   msg.classList.remove('hidden', 'err');
   msg.textContent = result.ok ? 'Gespeichert.' : 'Fehler beim Speichern.';

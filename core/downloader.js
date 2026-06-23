@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { app } = require('electron');
 const { saveConfig, loadConfig } = require('./config');
+const { analyzePdfDreieich, ocrText, countDreieich } = require('./pageverify');
 
 // Format a Date (or undefined = today) as YYYY-MM-DD
 function formatDate(d) {
@@ -355,6 +356,47 @@ async function findDreieichSection(page, logger) {
 }
 
 // ---------------------------------------------------------------------------
+// Vision fallback: take a screenshot of the current spread and ask Claude
+// which side shows "Dreieich" as a section header.
+// Returns 'Linke Seite', 'Rechte Seite', or null on failure/uncertainty.
+// Saves a debug PNG to screenshotPath if provided.
+// ---------------------------------------------------------------------------
+async function analyzeSpreadForDreieich(page, logger, apiKey, screenshotPath) {
+  const buf = await page.screenshot({ fullPage: false });
+  if (screenshotPath) {
+    try { fs.writeFileSync(screenshotPath, buf); } catch {}
+  }
+  const { default: Anthropic } = require('@anthropic-ai/sdk');
+  const client = new Anthropic({ apiKey });
+  const resp = await client.messages.create({
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 50,
+    messages: [{
+      role: 'user',
+      content: [
+        {
+          type: 'image',
+          source: { type: 'base64', media_type: 'image/png', data: buf.toString('base64') },
+        },
+        {
+          type: 'text',
+          text: 'Du siehst den rebrush ePaper-Reader mit einer Zeitungs-Doppelseite. ' +
+            'Links ist die linke Seite, rechts die rechte Seite.\n\n' +
+            'Auf welcher Seite erscheint "Dreieich" als Sektionsüberschrift oder Seitenheader?\n\n' +
+            'Antworte NUR mit einem dieser Wörter: "Linke Seite", "Rechte Seite" oder "Unbekannt".',
+        },
+      ],
+    }],
+  });
+  const text = ((resp.content[0] && resp.content[0].text) || '').trim();
+  const lower = text.toLowerCase();
+  if (lower.includes('linke')) return 'Linke Seite';
+  if (lower.includes('rechte')) return 'Rechte Seite';
+  logger.warn('Vision: unklare Antwort: "' + text + '"');
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Poll the page URL concurrently with an Inhalt navigation click, trying to
 // capture the transient single-page URL (#/ID/30) before the reader switches
 // to the spread view (#/ID/30-31).
@@ -703,6 +745,122 @@ async function downloadSide(page, side, outFile, logger) {
     }
   }
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// OCR-based side detection: clip the current spread into a left and a right
+// half, OCR each, and decide which half shows more "Dreieich". Used only as a
+// fallback when neither candidate PDF carries a usable text layer.
+// Returns 'Linke Seite', 'Rechte Seite', or null (OCR unavailable/inconclusive).
+// ---------------------------------------------------------------------------
+async function ocrSpreadSide(page, logger) {
+  const vp = page.viewportSize() || { width: 1280, height: 800 };
+  const half = Math.floor(vp.width / 2);
+  try {
+    const leftBuf  = await page.screenshot({ clip: { x: 0,    y: 0, width: half,             height: vp.height } });
+    const leftTxt  = await ocrText(leftBuf, logger);
+    if (leftTxt == null) return null;               // tesseract.js not installed
+    const rightBuf = await page.screenshot({ clip: { x: half, y: 0, width: vp.width - half,  height: vp.height } });
+    const rightTxt = await ocrText(rightBuf, logger);
+    const lc = countDreieich(leftTxt);
+    const rc = countDreieich(rightTxt || '');
+    logger.info('OCR: Dreieich-Treffer links ' + lc + ' / rechts ' + rc);
+    if (lc > rc) return 'Linke Seite';
+    if (rc > lc) return 'Rechte Seite';
+    return null;
+  } catch (e) {
+    logger.warn('OCR-Screenshot fehlgeschlagen: ' + e.message);
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Download the Dreieich page of the currently displayed spread and VERIFY by
+// content which physical side is correct – never silently keep the neighbour.
+//
+// Staffel (each step only runs if the previous was inconclusive):
+//   1. PDF-Text-Verify  – download both sides, read the real text layer, keep
+//                         the side that genuinely contains "Dreieich".
+//   2. OCR              – if neither PDF has a text layer, OCR the spread halves.
+//   3. Vision           – if OCR unavailable/inconclusive and an API key is set.
+//   4. Heuristik        – last resort: keep the heuristically preferred side.
+//
+// Saves the chosen page to outFile and returns { side, file } (or null).
+// ---------------------------------------------------------------------------
+async function downloadDreieichVerified(page, preferredSide, outFile, logger, ctx) {
+  const other = preferredSide === 'Rechte Seite' ? 'Linke Seite' : 'Rechte Seite';
+  const base = outFile.replace(/\.pdf$/i, '');
+  const tmpFor = (side) => base + (side === 'Linke Seite' ? '.L' : '.R') + '.tmp.pdf';
+
+  // 1) Download both sides of the spread and analyse their text layers.
+  const r = {};
+  for (const side of [preferredSide, other]) {
+    const tmp = tmpFor(side);
+    const ok = await downloadSide(page, side, tmp, logger);
+    if (!ok) { r[side] = null; continue; }
+    const a = await analyzePdfDreieich(tmp);
+    r[side] = { file: tmp, a };
+    logger.info('Verify ' + side + ': ' + (a.hasText
+      ? 'Dreieich-Treffer ' + a.count + (a.headerHit ? ', Header ✓' : '')
+      : 'kein Textlayer'));
+  }
+
+  const cleanup = (keepSide) => {
+    for (const side of [preferredSide, other]) {
+      if (side !== keepSide && r[side] && r[side].file) {
+        try { fs.unlinkSync(r[side].file); } catch {}
+      }
+    }
+  };
+  const choose = (side, reason) => {
+    fs.renameSync(r[side].file, outFile);
+    cleanup(side);
+    logger.info(reason + ' → ' + side + ' (' + path.basename(outFile) + ')');
+    return { side, file: outFile };
+  };
+
+  const haveText = [preferredSide, other].filter(s => r[s] && r[s].a.hasText);
+
+  // 1a) Composite text score: occurrences dominate, header presence breaks ties.
+  if (haveText.length >= 1) {
+    const scoreOf = (s) => r[s].a.count * 10 + (r[s].a.headerHit ? 5 : 0);
+    if (haveText.length === 2) {
+      const [s1, s2] = haveText;
+      const v1 = scoreOf(s1), v2 = scoreOf(s2);
+      if (v1 !== v2 && Math.max(v1, v2) > 0) {
+        return choose(v1 > v2 ? s1 : s2, 'PDF-Verify: mehr Dreieich-Inhalt');
+      }
+      // Tie or both empty → fall through to OCR/Vision.
+    } else {
+      const s = haveText[0];
+      if (scoreOf(s) > 0) return choose(s, 'PDF-Verify: einzige Seite mit Dreieich-Text');
+    }
+  }
+
+  // 2) OCR fallback (image-only pages or inconclusive text).
+  const ocrSide = await ocrSpreadSide(page, logger);
+  if (ocrSide && r[ocrSide]) return choose(ocrSide, 'OCR-Verify');
+
+  // 3) Vision fallback.
+  if (ctx.apiKey) {
+    try {
+      fs.mkdirSync(path.join(ctx.outputDir, 'debug'), { recursive: true });
+      const shot = path.join(ctx.outputDir, 'debug', 'verify-' + ctx.dateStr + '-' + Date.now() + '.png');
+      const vSide = await analyzeSpreadForDreieich(page, logger, ctx.apiKey, shot);
+      if (vSide && r[vSide]) return choose(vSide, 'Vision-Verify');
+    } catch (e) {
+      logger.warn('Vision-Verify fehlgeschlagen: ' + e.message);
+    }
+  }
+
+  // 4) Heuristik – keep the preferred side (or the only one available).
+  if (r[preferredSide]) {
+    logger.warn('Keine eindeutige Verifikation – Annahme ' + preferredSide +
+      ' (Heuristik). Bitte Datei prüfen.');
+    return choose(preferredSide, 'Heuristik');
+  }
+  if (r[other]) return choose(other, 'Nur ' + other + ' verfügbar');
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1146,6 +1304,40 @@ async function downloadDateInSession(page, kioskUrl, config, dateStr, logger, ab
       (sec.currentPage != null ? ', Seite ' + sec.currentPage : ''));
   }
 
+  // Vision fallback (Level 3): for Dreieich sections still lacking currentPage
+  // after URL-interception + neighbor probe, take a screenshot and ask Claude.
+  const apiKey = config.anthropicApiKey || process.env.ANTHROPIC_API_KEY || '';
+  const needsVision = probe.filter(s => s.score > 0 && !s.skip && s.currentPage == null);
+  if (needsVision.length > 0 && apiKey) {
+    const visionDir = path.join(outputDir, 'debug');
+    fs.mkdirSync(visionDir, { recursive: true });
+    for (const sec of needsVision) {
+      const navOk = await openInhaltSection(page, sec.text, logger);
+      if (!navOk) continue;
+      await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+      await page.waitForTimeout(800);
+      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const shotPath = path.join(visionDir, 'vision-' + dateStr + '-' + ts + '.png');
+      try {
+        const side = await analyzeSpreadForDreieich(page, logger, apiKey, shotPath);
+        if (side) {
+          const parts = (sec.range || '').split('-').map(Number).filter(n => !isNaN(n));
+          if (parts.length === 2) {
+            sec.currentPage = side === 'Linke Seite' ? parts[0] : parts[1];
+          }
+          logger.info('Vision: "' + sec.text + '" auf ' + side + ' erkannt → Seite ' + sec.currentPage);
+        } else {
+          logger.warn('Vision: keine eindeutige Seite erkannt für "' + sec.text + '"');
+        }
+      } catch (e) {
+        logger.warn('Vision-Analyse fehlgeschlagen (' + e.message + ') – Heuristik greift.');
+      }
+    }
+  } else if (needsVision.length > 0 && !apiKey) {
+    logger.info('Kein Anthropic API Key → Vision-Fallback inaktiv. ' +
+      needsVision.map(s => '"' + s.text + '"').join(', ') + ' nutzt Heuristik.');
+  }
+
   assignSides(probe.filter(s => !s.skip), logger);
   const active = probe.filter(s => !s.skip && s.score > 0);
 
@@ -1154,24 +1346,28 @@ async function downloadDateInSession(page, kioskUrl, config, dateStr, logger, ab
   // ------------------------------------------------------------------
   const downloadedFiles = [];
   const seenSpreadSide = new Set();
+  const verifyCtx = { dateStr, outputDir, apiKey };
   for (const sec of active) {
-    const key = (sec.range || sec.text) + '|' + sec.side;
-    if (seenSpreadSide.has(key)) {
-      logger.info('Überspringe Duplikat: "' + sec.text + '" (' + sec.side + ' auf Spread ' + sec.range + ' bereits geladen)');
-      continue;
-    }
-    logger.info('Öffne Sektion: "' + sec.text + '" (' + sec.side + ')');
+    logger.info('Öffne Sektion: "' + sec.text + '" (Annahme ' + sec.side + ')');
     const secOpened = await openInhaltSection(page, sec.text, logger);
     if (!secOpened) { logger.warn('Sektion "' + sec.text + '" nicht anklickbar – übersprungen.'); continue; }
     await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
     await page.waitForTimeout(1000);
 
     const outFile = path.join(outputDir, 'Dreieich_' + dateStr + '_' + toSafeFilename(sec.text) + '.pdf');
-    const ok = await downloadSide(page, sec.side, outFile, logger);
-    if (ok) {
-      seenSpreadSide.add(key);
-      downloadedFiles.push(outFile);
+    const chosen = await downloadDreieichVerified(page, sec.side, outFile, logger, verifyCtx);
+    if (!chosen) continue;
+
+    // Dedupe on the VERIFIED side (not the heuristic guess) so two sections that
+    // resolve to the same physical page are not downloaded twice.
+    const key = (sec.range || sec.text) + '|' + chosen.side;
+    if (seenSpreadSide.has(key)) {
+      logger.info('Überspringe Duplikat: "' + sec.text + '" (' + chosen.side + ' auf Spread ' + sec.range + ' bereits geladen)');
+      try { fs.unlinkSync(outFile); } catch {}
+      continue;
     }
+    seenSpreadSide.add(key);
+    downloadedFiles.push(outFile);
   }
 
   if (downloadedFiles.length === 0) {

@@ -198,19 +198,24 @@ let activeDownloadAbort = null;
 
 ipcMain.handle('config:get', async () => {
   const cfg = await loadConfig();
-  // Passwort nicht im Klartext an Renderer schicken
-  return { ...cfg, password: cfg.password ? '••••••••' : '' };
+  return {
+    ...cfg,
+    password: cfg.password ? '••••••••' : '',
+    anthropicApiKey: cfg.anthropicApiKey ? '••••••••' : '',
+  };
 });
 
 ipcMain.handle('config:save', async (_e, updates) => {
   const current = await loadConfig();
-  // Passwort nur überschreiben wenn der Nutzer einen neuen Wert eingegeben hat
   const newCfg = {
     ...current,
     ...updates,
     password: updates.password && updates.password !== '••••••••'
       ? updates.password
       : current.password,
+    anthropicApiKey: updates.anthropicApiKey && updates.anthropicApiKey !== '••••••••'
+      ? updates.anthropicApiKey
+      : current.anthropicApiKey,
   };
   await saveConfig(newCfg);
   return { ok: true };
